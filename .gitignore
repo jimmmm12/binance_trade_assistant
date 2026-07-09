@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime data
+.superpowers/
+docs/superpowers/
+data/
+reports/
+*.db
+*.sqlite
+*.sqlite3
+
+# Build and packaged executable outputs
+build/
+dist/
+release/
+build_*/
+dist_*/
+release_*/
+*.spec
+
+# Local secrets and environment files
+.env
+.env.*
+*.key
+*.pem
+*.p12
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
