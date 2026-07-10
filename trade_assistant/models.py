@@ -66,6 +66,10 @@ class ScoreBreakdown:
     funding: int
     reasons: list[str]
     warnings: list[str]
+    volatility: int = 0
+    position: int = 0
+    recommendation: str = "等待确认"
+    action_level: str = "observe"
 
 
 @dataclass(frozen=True)

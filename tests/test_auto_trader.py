@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from trade_assistant.auto_trader import AutoTradeConfig, run_auto_cycle, select_candidate
+from trade_assistant.automation_state import AutoTradeState
 from trade_assistant.models import ScoreBreakdown, ScoredSignal, Signal
+from trade_assistant.portfolio import SimulatedPortfolio
 
 
 def _scored(symbol: str, score: int, side: str = "long") -> ScoredSignal:
@@ -36,6 +38,10 @@ def _scored(symbol: str, score: int, side: str = "long") -> ScoredSignal:
             funding=7,
             reasons=["流动性充足"],
             warnings=[],
+            volatility=10,
+            position=10,
+            recommendation="可交易，≤3x",
+            action_level="tradeable",
         ),
     )
 
@@ -62,6 +68,8 @@ def test_auto_cycle_generates_plan_and_simulates_order_when_enabled(tmp_path) ->
     decision = run_auto_cycle(config, scan_fn=fake_scan)
 
     assert decision.action == "simulated_order"
+    assert decision.state == AutoTradeState.MANAGING
+    assert "已开仓" in decision.state_path
     assert decision.plan is not None
     assert decision.review is not None
     assert decision.position is not None
@@ -97,3 +105,59 @@ def test_auto_cycle_can_simulate_short_futures_signal(tmp_path) -> None:
     assert decision.action == "simulated_order"
     assert decision.position is not None
     assert decision.position.side == "short"
+
+
+def test_auto_cycle_does_not_repeat_order_when_position_exists(tmp_path) -> None:
+    db_path = tmp_path / "auto.db"
+    SimulatedPortfolio(db_path).apply_fill("futures", "UNIUSDT", "BUY", 1, 10)
+    config = AutoTradeConfig(
+        market="futures",
+        mode="intraday",
+        top=5,
+        auto_simulate=True,
+        portfolio_path=db_path,
+        automation_log_path=tmp_path / "events.jsonl",
+    )
+
+    decision = run_auto_cycle(config, scan_fn=lambda: ([_scored("UNIUSDT", 86)], []))
+
+    assert decision.action == "manage_position"
+    assert decision.position is not None
+    assert decision.position.quantity == 1
+
+
+def test_auto_cycle_blocks_low_score_live_plan_when_not_simulating(tmp_path) -> None:
+    low = _scored("RISKUSDT", 45)
+    low = ScoredSignal(
+        signal=low.signal,
+        mode=low.mode,
+        breakdown=ScoreBreakdown(
+            total=45,
+            liquidity=8,
+            trend=6,
+            volume=6,
+            relative_strength=4,
+            risk=5,
+            funding=3,
+            reasons=[],
+            warnings=["ATR波动过大，禁止真仓自动下单"],
+            volatility=1,
+            position=10,
+            recommendation="禁止真仓，仅观察",
+            action_level="block_live",
+        ),
+    )
+    config = AutoTradeConfig(
+        market="futures",
+        mode="intraday",
+        top=5,
+        auto_simulate=False,
+        portfolio_path=tmp_path / "auto.db",
+        automation_log_path=tmp_path / "events.jsonl",
+    )
+
+    decision = run_auto_cycle(config, scan_fn=lambda: ([low], []))
+
+    assert decision.action == "blocked"
+    assert decision.state == AutoTradeState.BLOCKED
+    assert "只观察" in decision.message

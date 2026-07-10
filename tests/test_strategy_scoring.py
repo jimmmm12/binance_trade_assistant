@@ -40,6 +40,7 @@ def test_scored_signal_keeps_base_signal_and_breakdown():
     assert scored.symbol == "UNIUSDT"
     assert scored.score == 82
     assert scored.reasons == ["1h趋势向上"]
+    assert scored.breakdown.recommendation == "等待确认"
 
 
 def test_position_models_hold_normalized_state():
@@ -69,6 +70,8 @@ def test_intraday_rewards_volume_surge_and_liquidity():
 
     assert scored.mode == "intraday"
     assert scored.score >= 70
+    assert scored.breakdown.volatility >= 0
+    assert scored.breakdown.recommendation
     assert any("短期放量" in reason for reason in scored.reasons)
 
 

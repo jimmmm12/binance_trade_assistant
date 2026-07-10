@@ -52,8 +52,11 @@ def _score_intraday(signal: Signal, btc_momentum_24h: float, eth_momentum_24h: f
 
     risk = _risk_score(signal.rsi_1h, momentum, max_score=10, warnings=warnings)
     funding = _funding_score(signal, max_score=7, warnings=warnings)
+    volatility = _volatility_score(signal.atr_1h_pct or signal.atr_pct, max_score=10, warnings=warnings, mode="intraday")
+    position = 10
 
-    total = liquidity + volume + trend + clamp(momentum * 2.0, high=15) + relative_strength + risk + funding
+    total = liquidity + volume + trend + clamp(momentum * 2.0, high=15) + relative_strength + risk + funding + volatility
+    recommendation, action_level = _recommendation(total, warnings, signal, mode="intraday")
     breakdown = ScoreBreakdown(
         total=clamp(total),
         liquidity=liquidity,
@@ -64,6 +67,10 @@ def _score_intraday(signal: Signal, btc_momentum_24h: float, eth_momentum_24h: f
         funding=funding,
         reasons=reasons,
         warnings=warnings,
+        volatility=volatility,
+        position=position,
+        recommendation=recommendation,
+        action_level=action_level,
     )
     return ScoredSignal(signal=signal, mode="intraday", breakdown=breakdown)
 
@@ -96,11 +103,14 @@ def _score_swing(signal: Signal, btc_momentum_24h: float, eth_momentum_24h: floa
 
     risk = _risk_score(signal.rsi_4h, abs(signal.momentum_3d), max_score=10, warnings=warnings)
     funding = _funding_score(signal, max_score=5, warnings=warnings)
+    volatility = _volatility_score(signal.atr_4h_pct or signal.atr_pct, max_score=10, warnings=warnings, mode="swing")
+    position = 10
     momentum_score = clamp(abs(signal.momentum_3d) * 2.2, high=20)
     if momentum_score >= 12:
         reasons.append("3日动量延续")
 
-    total = liquidity + volume + trend + momentum_score + relative_strength + risk + funding
+    total = liquidity + volume + trend + momentum_score + relative_strength + risk + funding + volatility
+    recommendation, action_level = _recommendation(total, warnings, signal, mode="swing")
     breakdown = ScoreBreakdown(
         total=clamp(total),
         liquidity=liquidity,
@@ -111,6 +121,10 @@ def _score_swing(signal: Signal, btc_momentum_24h: float, eth_momentum_24h: floa
         funding=funding,
         reasons=reasons,
         warnings=warnings,
+        volatility=volatility,
+        position=position,
+        recommendation=recommendation,
+        action_level=action_level,
     )
     return ScoredSignal(signal=signal, mode="swing", breakdown=breakdown)
 
@@ -154,3 +168,36 @@ def _funding_score(signal: Signal, max_score: int, warnings: list[str]) -> int:
     if abs(funding) >= 0.04:
         return clamp(max_score * 0.7, high=max_score)
     return max_score
+
+
+def _volatility_score(atr_pct: float | None, max_score: int, warnings: list[str], mode: str) -> int:
+    if atr_pct is None or atr_pct <= 0:
+        warnings.append("ATR数据不足，计划质量降级")
+        return clamp(max_score * 0.5, high=max_score)
+    high = 6.0 if mode == "intraday" else 14.0
+    warn = 4.0 if mode == "intraday" else 8.0
+    if atr_pct >= high:
+        warnings.append("ATR波动过大，禁止真仓自动下单")
+        return clamp(max_score * 0.1, high=max_score)
+    if atr_pct >= warn:
+        warnings.append("ATR波动偏大，只建议小仓或模拟")
+        return clamp(max_score * 0.45, high=max_score)
+    if atr_pct <= (0.35 if mode == "intraday" else 0.8):
+        warnings.append("波动过低，盈亏比可能不足")
+        return clamp(max_score * 0.6, high=max_score)
+    return max_score
+
+
+def _recommendation(total: float, warnings: list[str], signal: Signal, mode: str) -> tuple[str, str]:
+    score = clamp(total)
+    hard_risk = any("禁止真仓" in warning or "过大" in warning for warning in warnings)
+    if hard_risk or score < 55:
+        return "禁止真仓，仅观察", "block_live"
+    if warnings or score < 70:
+        return "只模拟", "simulate_only"
+    if score < 82:
+        return "可交易，小仓确认", "small_trade"
+    leverage_hint = "≤3x" if mode == "intraday" else "≤2x"
+    if signal.market == "spot":
+        leverage_hint = "现货"
+    return f"可交易，{leverage_hint}", "tradeable"

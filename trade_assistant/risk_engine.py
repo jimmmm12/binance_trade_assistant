@@ -99,8 +99,17 @@ def evaluate_plan_risk(
         score -= 25
 
     score = max(0, min(100, score))
-    live_allowed = liquidation_status != "不建议下单" and score >= min_live_score
-    if not live_allowed:
+    hard_signal_block = signal is not None and (
+        (signal.atr_pct is not None and signal.atr_pct >= (6.0 if mode == "intraday" else 14.0))
+        or (signal.funding_pct is not None and abs(signal.funding_pct) >= 0.12)
+    )
+    live_allowed = liquidation_status != "不建议下单" and score >= min_live_score and not hard_signal_block
+    if hard_signal_block:
+        recommended_action = "禁止真仓"
+        warnings.append("信号存在硬风险，只允许模拟或观察")
+    elif not live_allowed and score < 55:
+        recommended_action = "只观察"
+    elif not live_allowed:
         recommended_action = "只建议模拟"
     elif score < 82 or liquidation_status == "偏危险":
         recommended_action = "谨慎小仓"

@@ -84,7 +84,9 @@ def signal_to_row(signal: Signal | ScoredSignal) -> dict[str, str]:
     score = signal.score if isinstance(signal, ScoredSignal) else base.score
     reasons = "；".join(signal.reasons) if isinstance(signal, ScoredSignal) else base.note
     warnings = "；".join(signal.warnings) if isinstance(signal, ScoredSignal) else ""
-    recommendation = _signal_recommendation(base, warnings)
+    recommendation = (
+        signal.breakdown.recommendation if isinstance(signal, ScoredSignal) else _signal_recommendation(base, warnings)
+    )
     return {
         "市场": "合约" if base.market == "futures" else "现货",
         "交易对": base.symbol,

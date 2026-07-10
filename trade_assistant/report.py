@@ -60,6 +60,9 @@ def write_scan_report(longs: list[Signal | ScoredSignal], shorts: list[Signal | 
             "强弱分",
             "风险分",
             "资金费率分",
+            "波动分",
+            "仓位冲突分",
+            "综合建议",
             "入选原因",
             "风险提示",
             "备注",
@@ -73,14 +76,15 @@ def write_scan_report(longs: list[Signal | ScoredSignal], shorts: list[Signal | 
 
 def _signal_section(title: str, signals: list[Signal | ScoredSignal]) -> list[str]:
     lines = [f"## {title}", ""]
-    lines.append("| 市场 | 交易对 | 方向 | 分数 | 最新价 | 24h涨跌 | 成交额(百万) | RSI 1h | RSI 4h | 成交量倍数 | 24h动量 | 3日动量 | 资金费率 | 入选原因 | 风险提示 | 备注 |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|")
+    lines.append("| 市场 | 交易对 | 方向 | 分数 | 最新价 | 24h涨跌 | 成交额(百万) | RSI 1h | RSI 4h | 成交量倍数 | 24h动量 | 3日动量 | 资金费率 | 综合建议 | 入选原因 | 风险提示 | 备注 |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|")
     for item in signals:
         signal = _base_signal(item)
         side = "做多" if signal.side == "long" else "做空"
         market = "合约" if signal.market == "futures" else "现货"
         reasons = "；".join(item.reasons) if isinstance(item, ScoredSignal) else ""
         warnings = "；".join(item.warnings) if isinstance(item, ScoredSignal) else ""
+        recommendation = item.breakdown.recommendation if isinstance(item, ScoredSignal) else "等待确认"
         lines.append(
             "| "
             + " | ".join(
@@ -98,6 +102,7 @@ def _signal_section(title: str, signals: list[Signal | ScoredSignal]) -> list[st
                     fmt(signal.momentum_24h, 2),
                     fmt(signal.momentum_3d, 2),
                     fmt(signal.funding_pct, 4),
+                    recommendation,
                     reasons,
                     warnings,
                     signal.note,
@@ -131,6 +136,9 @@ def _signal_csv_row(signal: Signal | ScoredSignal) -> dict[str, str | float | in
         "强弱分": "" if breakdown is None else breakdown.relative_strength,
         "风险分": "" if breakdown is None else breakdown.risk,
         "资金费率分": "" if breakdown is None else breakdown.funding,
+        "波动分": "" if breakdown is None else breakdown.volatility,
+        "仓位冲突分": "" if breakdown is None else breakdown.position,
+        "综合建议": "" if breakdown is None else breakdown.recommendation,
         "入选原因": "" if breakdown is None else "；".join(breakdown.reasons),
         "风险提示": "" if breakdown is None else "；".join(breakdown.warnings),
         "备注": base.note,

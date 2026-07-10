@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from trade_assistant.realtime_monitor import MonitorTarget, evaluate_monitor_target
+from trade_assistant.market_stream import BinanceWebSocketPriceCache, StreamPrice
+import time
 
 
 def test_monitor_long_target_reports_r_milestones_and_target() -> None:
@@ -57,3 +59,14 @@ def test_monitor_warns_when_price_is_close_to_liquidation() -> None:
 
     assert "接近强平" in result.alert_text
     assert result.severity == "danger"
+
+
+def test_websocket_price_cache_rejects_stale_prices() -> None:
+    cache = BinanceWebSocketPriceCache(stale_after_seconds=1)
+    cache._prices[("futures", "UNIUSDT")] = StreamPrice("futures", "UNIUSDT", 10.0, time.time() - 2)
+
+    assert cache.latest_price("futures", "UNIUSDT") is None
+
+    cache._prices[("futures", "UNIUSDT")] = StreamPrice("futures", "UNIUSDT", 11.0, time.time())
+
+    assert cache.latest_price("futures", "UNIUSDT") == 11.0

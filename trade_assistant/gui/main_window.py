@@ -37,6 +37,7 @@ from trade_assistant.auto_trader import AutoTradeConfig, AutoTradeDecision, run_
 from trade_assistant.binance_client import MarketDataUnavailable
 from trade_assistant.broker import LIVE_CONFIRMATION
 from trade_assistant.main import CONFIG_PATH, ROOT, load_settings
+from trade_assistant.market_stream import BinanceWebSocketPriceCache
 from trade_assistant.models import ScoredSignal, Signal, TradePlan
 from trade_assistant.order_brackets import build_exit_order_drafts
 from trade_assistant.portfolio import SimulatedPortfolio, read_futures_account_risk
@@ -133,6 +134,7 @@ class MainWindow(QMainWindow):
         self.monitor_position_timer = QTimer(self)
         self.monitor_position_timer.timeout.connect(self.refresh_positions_page)
         self.last_monitor_alerts: dict[str, str] = {}
+        self.price_stream = BinanceWebSocketPriceCache(stale_after_seconds=5)
         self.latest_markdown_path: Path | None = None
         self.latest_csv_path: Path | None = None
         self._build_ui()
@@ -386,6 +388,9 @@ class MainWindow(QMainWindow):
         self.auto_status_label = QLabel("自动交易未启动：当前版本不会自动真下单，只会自动计划和可选本地模拟下单。")
         self.auto_status_label.setWordWrap(True)
         layout.addWidget(self.auto_status_label)
+        self.auto_state_label = QLabel("状态机：空仓观察")
+        self.auto_state_label.setWordWrap(True)
+        layout.addWidget(self.auto_state_label)
 
         self.auto_log_table = QTableWidget(0, 5)
         self.auto_log_table.setHorizontalHeaderLabels(["时间", "状态", "交易对", "动作", "说明"])
@@ -744,12 +749,14 @@ class MainWindow(QMainWindow):
             return
         self.auto_cycle_running = True
         self.auto_status_label.setText("自动交易运行中：正在扫描并生成计划。")
+        settings = load_settings()
         config = AutoTradeConfig(
             market=self.auto_market_combo.currentData(),
             mode=self.auto_mode_combo.currentData(),
             top=self.auto_top_spin.value(),
             auto_simulate=self.auto_simulate_checkbox.isChecked(),
             equity=self.auto_equity_spin.value(),
+            max_daily_loss_pct=float(settings.get("daily_loss_stop_pct", 2.0)),
         )
         worker = FunctionWorker(self._run_auto_trade_worker, config)
         worker.signals.result.connect(self.auto_trade_cycle_finished)
@@ -796,6 +803,7 @@ class MainWindow(QMainWindow):
 
         symbol = decision.signal.symbol if decision.signal is not None else ""
         self._append_auto_log(decision.action, symbol, "自动循环", decision.message)
+        self.auto_state_label.setText(f"状态机：{decision.state_path}")
         self.auto_status_label.setText(decision.message)
         self.append_log(f"自动交易：{decision.message}")
         if decision.plan is not None:
@@ -948,6 +956,11 @@ class MainWindow(QMainWindow):
     def submit_order(self, live: bool) -> None:
         self.refresh_status()
         if live:
+            market_guard = self._fresh_market_data_guard()
+            if market_guard:
+                QMessageBox.warning(self, "实时行情锁定", market_guard)
+                self.append_log(market_guard)
+                return
             if self.current_risk_review and not self.current_risk_review.live_allowed:
                 QMessageBox.warning(self, "风控锁定", "当前计划风控评分不足或强平安全垫不足，只允许模拟。")
                 self.append_log("风控锁定：当前计划只允许模拟，不发送真实订单。")
@@ -1100,15 +1113,19 @@ class MainWindow(QMainWindow):
 
     def toggle_realtime_monitor(self, enabled: bool) -> None:
         if enabled:
+            targets = self._monitor_targets()
+            self.price_stream.update_symbols([(target.market, target.symbol) for target in targets])
+            self.price_stream.start()
             self.monitor_timer.start(self.monitor_price_interval_spin.value() * 1000)
             self.monitor_position_timer.start(self.monitor_position_interval_spin.value() * 1000)
-            self.monitor_status_label.setText("实时监控已启动：价格秒级监控，真仓默认只报警。")
+            self.monitor_status_label.setText("实时监控已启动：WebSocket 秒级行情，真仓默认只报警。")
             self.append_log("实时监控已启动。")
             self.run_realtime_monitor_cycle()
             self.refresh_positions_page()
         else:
             self.monitor_timer.stop()
             self.monitor_position_timer.stop()
+            self.price_stream.stop()
             self.monitor_status_label.setText("实时监控已停止")
             self.append_log("实时监控已停止。")
 
@@ -1120,6 +1137,8 @@ class MainWindow(QMainWindow):
             self.monitor_table.setRowCount(0)
             self.monitor_status_label.setText("实时监控已启动：暂无计划或持仓目标。")
             return
+        self.price_stream.update_symbols([(target.market, target.symbol) for target in targets])
+        self.price_stream.start()
         self.monitor_cycle_running = True
         worker = FunctionWorker(self._run_realtime_monitor_worker, targets)
         worker.signals.result.connect(self.realtime_monitor_cycle_finished)
@@ -1136,7 +1155,9 @@ class MainWindow(QMainWindow):
         for target in targets:
             key = (target.market, target.symbol)
             if key not in prices:
-                prices[key] = client.latest_price(target.market, target.symbol)
+                prices[key] = self.price_stream.latest_price(target.market, target.symbol) or client.latest_price(
+                    target.market, target.symbol
+                )
             results.append(evaluate_monitor_target(target, prices[key]))
         return results
 
@@ -1164,7 +1185,8 @@ class MainWindow(QMainWindow):
                 self.append_log(f"实时监控 {result.target.symbol}：{result.alert_text}")
                 self.last_monitor_alerts[alert_key] = result.alert_text
         self.monitor_status_label.setText(
-            f"实时监控已更新：{len(results)} 个目标，{QDateTime.currentDateTime().toString('HH:mm:ss')}"
+            f"实时监控已更新：{len(results)} 个目标，{QDateTime.currentDateTime().toString('HH:mm:ss')}，"
+            f"{self.price_stream.freshness_text()}"
         )
         if self.position_source_mode == "simulated":
             self.refresh_positions_page()
@@ -1235,6 +1257,21 @@ class MainWindow(QMainWindow):
             stop=stop,
             target=target,
         )
+
+    def _fresh_market_data_guard(self) -> str | None:
+        symbol = self.symbol_input.text().strip().upper()
+        if not symbol:
+            return "缺少交易对，禁止真下单。"
+        market = self.market_combo.currentData()
+        self.price_stream.update_symbols([(market, symbol)])
+        self.price_stream.start()
+        if self.price_stream.latest_price(market, symbol, max_age_seconds=5) is None:
+            return "实时 WebSocket 行情未就绪或超过 5 秒未更新，真下单已锁定。"
+        return None
+
+    def closeEvent(self, event) -> None:
+        self.price_stream.stop()
+        super().closeEvent(event)
 
     def _dedupe_monitor_targets(self, targets: list[MonitorTarget]) -> list[MonitorTarget]:
         deduped: dict[tuple[str, str, str, float, float, float], MonitorTarget] = {}

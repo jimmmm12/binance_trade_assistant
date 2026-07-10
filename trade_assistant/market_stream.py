@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import json
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class StreamPrice:
+    market: str
+    symbol: str
+    price: float
+    updated_at: float
+
+    def age_seconds(self) -> float:
+        return max(0.0, time.time() - self.updated_at)
+
+
+class BinanceWebSocketPriceCache:
+    def __init__(self, stale_after_seconds: float = 5.0) -> None:
+        self.stale_after_seconds = stale_after_seconds
+        self._prices: dict[tuple[str, str], StreamPrice] = {}
+        self._symbols: set[tuple[str, str]] = set()
+        self._lock = threading.Lock()
+        self._ws: Any = None
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self.last_error: str | None = None
+        self.connected = False
+
+    def update_symbols(self, targets: list[tuple[str, str]]) -> None:
+        normalized = {(market, symbol.upper()) for market, symbol in targets if symbol}
+        with self._lock:
+            if normalized == self._symbols:
+                return
+            self._symbols = normalized
+        if self._running:
+            self.restart()
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run_forever, daemon=True)
+        self._thread.start()
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
+
+    def stop(self) -> None:
+        self._running = False
+        self.connected = False
+        ws = self._ws
+        self._ws = None
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def latest_price(self, market: str, symbol: str, max_age_seconds: float | None = None) -> float | None:
+        max_age = self.stale_after_seconds if max_age_seconds is None else max_age_seconds
+        with self._lock:
+            item = self._prices.get((market, symbol.upper()))
+        if item is None or item.age_seconds() > max_age:
+            return None
+        return item.price
+
+    def freshness_text(self) -> str:
+        with self._lock:
+            prices = list(self._prices.values())
+            symbol_count = len(self._symbols)
+        if not self._running:
+            return "WebSocket 未启动"
+        if not prices:
+            return "WebSocket 等待行情"
+        newest_age = min(price.age_seconds() for price in prices)
+        state = "已连接" if self.connected else "重连中"
+        return f"WebSocket {state}，订阅 {symbol_count} 个，最新 {newest_age:.1f}s 前"
+
+    def _run_forever(self) -> None:
+        while self._running:
+            streams = self._stream_names()
+            if not streams:
+                time.sleep(0.5)
+                continue
+            url = f"wss://fstream.binance.com/stream?streams={'/'.join(streams)}"
+            try:
+                import websocket
+
+                self._ws = websocket.WebSocketApp(
+                    url,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                    on_open=self._on_open,
+                )
+                self._ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.connected = False
+            if self._running:
+                time.sleep(2)
+
+    def _stream_names(self) -> list[str]:
+        with self._lock:
+            symbols = sorted(self._symbols)
+        return [f"{symbol.lower()}@markPrice@1s" if market == "futures" else f"{symbol.lower()}@ticker" for market, symbol in symbols]
+
+    def _on_open(self, ws: Any) -> None:
+        self.connected = True
+        self.last_error = None
+
+    def _on_close(self, ws: Any, close_status_code: Any, close_msg: Any) -> None:
+        self.connected = False
+
+    def _on_error(self, ws: Any, error: Any) -> None:
+        self.last_error = str(error)
+        self.connected = False
+
+    def _on_message(self, ws: Any, message: str) -> None:
+        payload = json.loads(message)
+        stream = str(payload.get("stream", ""))
+        data = payload.get("data", {})
+        symbol = str(data.get("s", "")).upper()
+        if not symbol:
+            return
+        market = "futures" if "@markPrice" in stream else "spot"
+        raw_price = data.get("p") if market == "futures" else data.get("c")
+        if raw_price in (None, ""):
+            return
+        item = StreamPrice(market=market, symbol=symbol, price=float(raw_price), updated_at=time.time())
+        with self._lock:
+            self._prices[(market, symbol)] = item
+
