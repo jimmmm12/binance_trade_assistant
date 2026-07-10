@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from trade_assistant.auto_trader import AutoTradeConfig, run_auto_cycle, select_candidate
+from trade_assistant.auto_trader import AUTO_EXECUTION_LIVE, AutoTradeConfig, run_auto_cycle, select_candidate
 from trade_assistant.automation_state import AutoTradeState
 from trade_assistant.models import ScoreBreakdown, ScoredSignal, Signal
 from trade_assistant.portfolio import SimulatedPortfolio
@@ -161,3 +161,52 @@ def test_auto_cycle_blocks_low_score_live_plan_when_not_simulating(tmp_path) -> 
     assert decision.action == "blocked"
     assert decision.state == AutoTradeState.BLOCKED
     assert "只观察" in decision.message
+
+
+def test_auto_cycle_live_mode_requires_confirmation(tmp_path) -> None:
+    config = AutoTradeConfig(
+        market="futures",
+        mode="intraday",
+        top=5,
+        auto_simulate=False,
+        execution_mode=AUTO_EXECUTION_LIVE,
+        live_confirm="WRONG",
+        portfolio_path=tmp_path / "auto.db",
+        automation_log_path=tmp_path / "events.jsonl",
+    )
+
+    decision = run_auto_cycle(
+        config,
+        scan_fn=lambda: ([_scored("UNIUSDT", 86)], []),
+        market_fresh_fn=lambda signal: (True, "fresh"),
+        live_status_fn=lambda: (True, "ready"),
+        live_order_fn=lambda plan, side: {"ok": True},
+    )
+
+    assert decision.action == "blocked"
+    assert "确认文字" in decision.message
+
+
+def test_auto_cycle_live_mode_sends_order_when_all_guards_pass(tmp_path) -> None:
+    sent: list[tuple[str, str]] = []
+    config = AutoTradeConfig(
+        market="futures",
+        mode="intraday",
+        top=5,
+        auto_simulate=False,
+        execution_mode=AUTO_EXECUTION_LIVE,
+        live_confirm="LIVE_TRADING_CONFIRMED",
+        portfolio_path=tmp_path / "auto.db",
+        automation_log_path=tmp_path / "events.jsonl",
+    )
+
+    decision = run_auto_cycle(
+        config,
+        scan_fn=lambda: ([_scored("UNIUSDT", 86)], []),
+        market_fresh_fn=lambda signal: (True, "fresh"),
+        live_status_fn=lambda: (True, "ready"),
+        live_order_fn=lambda plan, side: sent.append((plan.symbol, side)) or {"orderId": 1},
+    )
+
+    assert decision.action == "live_order_sent"
+    assert sent == [("UNIUSDT", "BUY")]

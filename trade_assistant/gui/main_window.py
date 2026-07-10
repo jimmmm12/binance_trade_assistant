@@ -33,14 +33,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from trade_assistant.auto_trader import AutoTradeConfig, AutoTradeDecision, run_auto_cycle
+from trade_assistant.auto_trader import (
+    AUTO_EXECUTION_LIVE,
+    AUTO_EXECUTION_PLAN,
+    AUTO_EXECUTION_SIMULATE,
+    AutoTradeConfig,
+    AutoTradeDecision,
+    run_auto_cycle,
+)
 from trade_assistant.binance_client import MarketDataUnavailable
 from trade_assistant.broker import LIVE_CONFIRMATION
 from trade_assistant.main import CONFIG_PATH, ROOT, load_settings
 from trade_assistant.market_stream import BinanceWebSocketPriceCache
 from trade_assistant.models import ScoredSignal, Signal, TradePlan
 from trade_assistant.order_brackets import build_exit_order_drafts
-from trade_assistant.portfolio import SimulatedPortfolio, read_futures_account_risk
+from trade_assistant.portfolio import (
+    SimulatedPortfolio,
+    read_futures_account_risk,
+    read_real_futures_position,
+    read_real_spot_position,
+)
 from trade_assistant.realtime_monitor import MonitorResult, MonitorTarget, evaluate_monitor_target
 from trade_assistant.report import trade_plan_to_markdown
 from trade_assistant.risk_engine import PlanRiskReview, account_read_failed_guard, daily_loss_guard
@@ -67,6 +79,11 @@ SIDE_CHOICES = [("做多", "long"), ("做空", "short")]
 ORDER_SIDE_CHOICES = [("买入 / 开多 / 平空", "BUY"), ("卖出 / 开空 / 平多", "SELL")]
 ORDER_TYPE_CHOICES = [("市价", "MARKET"), ("限价", "LIMIT")]
 STRATEGY_MODE_CHOICES = [("日内短线", "intraday"), ("1-3天波段", "swing")]
+AUTO_EXECUTION_CHOICES = [
+    ("只生成计划", AUTO_EXECUTION_PLAN),
+    ("自动模拟下单", AUTO_EXECUTION_SIMULATE),
+    ("自动真仓下单", AUTO_EXECUTION_LIVE),
+]
 
 
 SIGNAL_COLUMNS = [
@@ -358,15 +375,20 @@ class MainWindow(QMainWindow):
         self.auto_equity_spin.setRange(10, 1_000_000_000)
         self.auto_equity_spin.setDecimals(2)
         self.auto_equity_spin.setValue(1000)
-        self.auto_simulate_checkbox = QCheckBox("自动模拟下单")
-        self.auto_simulate_checkbox.setChecked(True)
+        self.auto_execution_combo = QComboBox()
+        self._add_combo_choices(self.auto_execution_combo, AUTO_EXECUTION_CHOICES)
+        self._set_combo_data(self.auto_execution_combo, AUTO_EXECUTION_SIMULATE)
+        self.auto_live_confirm_input = QLineEdit()
+        self.auto_live_confirm_input.setPlaceholderText(f"自动真仓必须输入 {LIVE_CONFIRMATION}")
+        self.auto_live_confirm_input.setEchoMode(QLineEdit.EchoMode.Password)
 
         controls.addRow("扫描市场", self.auto_market_combo)
         controls.addRow("策略模式", self.auto_mode_combo)
         controls.addRow("候选数量", self.auto_top_spin)
         controls.addRow("循环间隔", self.auto_interval_spin)
         controls.addRow("本轮本金", self.auto_equity_spin)
-        controls.addRow("执行方式", self.auto_simulate_checkbox)
+        controls.addRow("执行方式", self.auto_execution_combo)
+        controls.addRow("真仓确认", self.auto_live_confirm_input)
         layout.addWidget(controls_group)
 
         buttons = QHBoxLayout()
@@ -385,7 +407,7 @@ class MainWindow(QMainWindow):
         buttons.addStretch(1)
         layout.addLayout(buttons)
 
-        self.auto_status_label = QLabel("自动交易未启动：当前版本不会自动真下单，只会自动计划和可选本地模拟下单。")
+        self.auto_status_label = QLabel("自动交易未启动：默认自动模拟；自动真仓必须单独选择并输入确认文字。")
         self.auto_status_label.setWordWrap(True)
         layout.addWidget(self.auto_status_label)
         self.auto_state_label = QLabel("状态机：空仓观察")
@@ -721,16 +743,24 @@ class MainWindow(QMainWindow):
     def start_auto_trading(self) -> None:
         if self.auto_trading_enabled:
             return
+        if self._auto_execution_mode() == AUTO_EXECUTION_LIVE:
+            if self.auto_live_confirm_input.text().strip() != LIVE_CONFIRMATION:
+                QMessageBox.warning(self, "自动真仓锁定", f"自动真仓必须输入 {LIVE_CONFIRMATION}")
+                self.append_log("自动真仓锁定：确认文字不匹配。")
+                return
+            status = live_trading_status()
+            if not status.enabled:
+                QMessageBox.warning(self, "自动真仓锁定", status.reason)
+                self.append_log(f"自动真仓锁定：{status.reason}")
+                return
         self.auto_trading_enabled = True
         self.auto_start_button.setEnabled(False)
         self.auto_stop_button.setEnabled(True)
         interval_ms = self.auto_interval_spin.value() * 60 * 1000
         self.auto_timer.start(interval_ms)
-        self.auto_status_label.setText(
-            f"自动交易已启动：每 {self.auto_interval_spin.value()} 分钟运行一轮，"
-            "不会自动真下单。"
-        )
-        self.append_log("自动交易已启动。")
+        mode_label = self.auto_execution_combo.currentText()
+        self.auto_status_label.setText(f"自动交易已启动：每 {self.auto_interval_spin.value()} 分钟运行一轮，{mode_label}。")
+        self.append_log(f"自动交易已启动：{mode_label}。")
         self.run_auto_trade_cycle()
 
     def stop_auto_trading(self, reason: str = "自动交易已停止") -> None:
@@ -750,13 +780,16 @@ class MainWindow(QMainWindow):
         self.auto_cycle_running = True
         self.auto_status_label.setText("自动交易运行中：正在扫描并生成计划。")
         settings = load_settings()
+        execution_mode = self._auto_execution_mode()
         config = AutoTradeConfig(
             market=self.auto_market_combo.currentData(),
             mode=self.auto_mode_combo.currentData(),
             top=self.auto_top_spin.value(),
-            auto_simulate=self.auto_simulate_checkbox.isChecked(),
+            auto_simulate=execution_mode == AUTO_EXECUTION_SIMULATE,
             equity=self.auto_equity_spin.value(),
             max_daily_loss_pct=float(settings.get("daily_loss_stop_pct", 2.0)),
+            execution_mode=execution_mode,
+            live_confirm=self.auto_live_confirm_input.text().strip(),
         )
         worker = FunctionWorker(self._run_auto_trade_worker, config)
         worker.signals.result.connect(self.auto_trade_cycle_finished)
@@ -773,7 +806,14 @@ class MainWindow(QMainWindow):
             return scan_result.longs, scan_result.shorts
 
         try:
-            decision = run_auto_cycle(config, scan_fn=scan_for_auto)
+            decision = run_auto_cycle(
+                config,
+                scan_fn=scan_for_auto,
+                market_fresh_fn=self._auto_market_fresh,
+                live_status_fn=self._auto_live_status,
+                live_order_fn=lambda plan, side: self._auto_live_order(plan, side, config.live_confirm),
+                real_position_fn=self._auto_real_position,
+            )
         except MarketDataUnavailable as exc:
             return AutoTradeWorkerResult(market_error=str(exc))
         if scan_result is None:
@@ -818,8 +858,17 @@ class MainWindow(QMainWindow):
                 preview += "\n\n" + self._risk_review_text(decision.review)
             self.plan_preview.setPlainText(preview)
         if decision.position is not None and decision.plan is not None:
-            self.position_status_box.setPlainText("自动模拟下单：\n" + self._position_text(decision.position))
-            self._save_plan_position_record(decision.plan, "自动模拟持仓")
+            title = "自动真仓下单：" if decision.action == "live_order_sent" else "自动模拟下单："
+            self.position_status_box.setPlainText(title + "\n" + self._position_text(decision.position))
+            if decision.action == "live_order_sent":
+                self._save_detected_position_record(decision.position)
+            else:
+                self._save_plan_position_record(decision.plan, "自动模拟持仓")
+        if decision.action == "live_order_sent":
+            self.set_position_source_mode("real")
+            if not self.realtime_monitor_checkbox.isChecked():
+                self.realtime_monitor_checkbox.setChecked(True)
+            self.append_log("自动真仓订单已发送：已切换真实仓并启动实时监控。")
         if decision.plan is not None or decision.position is not None:
             self.refresh_positions_page()
 
@@ -845,6 +894,40 @@ class MainWindow(QMainWindow):
             item.setToolTip(value)
             self.auto_log_table.setItem(row, column, item)
         self.auto_log_table.scrollToBottom()
+
+    def _auto_execution_mode(self) -> str:
+        return self.auto_execution_combo.currentData()
+
+    def _auto_live_status(self) -> tuple[bool, str]:
+        status = live_trading_status()
+        return status.enabled, status.reason
+
+    def _auto_market_fresh(self, signal: ScoredSignal) -> tuple[bool, str]:
+        self.price_stream.update_symbols([(signal.market, signal.symbol)])
+        self.price_stream.start()
+        if self.price_stream.latest_price(signal.market, signal.symbol, max_age_seconds=5) is None:
+            return False, "自动真仓锁定：WebSocket 行情未就绪或超过 5 秒未更新"
+        return True, "WebSocket 行情新鲜"
+
+    def _auto_live_order(self, plan: TradePlan, order_side: str, confirm: str) -> dict:
+        return order_from_form(
+            plan.market,
+            plan.symbol,
+            order_side,
+            f"{plan.quantity:.8f}",
+            "LIMIT",
+            f"{plan.entry:.8f}",
+            allow_live=True,
+            confirm=confirm,
+        )
+
+    def _auto_real_position(self, signal: ScoredSignal):
+        from trade_assistant.binance_client import BinanceClient
+
+        client = BinanceClient()
+        if signal.market == "futures":
+            return read_real_futures_position(client, signal.symbol)
+        return read_real_spot_position(client, signal.symbol, signal.last)
 
     def fill_signal_table(self, table: QTableWidget, signals: list[Signal]) -> None:
         table.setRowCount(0)

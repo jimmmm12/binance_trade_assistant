@@ -136,9 +136,10 @@ def test_auto_trade_page_exposes_safe_cycle_controls() -> None:
 
     assert "自动" in nav_labels
     assert window.auto_interval_spin.value() == 5
-    assert window.auto_simulate_checkbox.isChecked() is True
+    assert window.auto_execution_combo.currentText() == "自动模拟下单"
+    assert window.auto_live_confirm_input.placeholderText()
     assert window.auto_timer.isActive() is False
-    assert "不会自动真下单" in window.auto_status_label.text()
+    assert "自动真仓" in window.auto_status_label.text()
 
     cycles: list[str] = []
     window.run_auto_trade_cycle = lambda: cycles.append("started")
