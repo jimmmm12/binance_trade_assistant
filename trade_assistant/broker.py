@@ -9,7 +9,14 @@ from .binance_client import BinanceClient
 LIVE_CONFIRMATION = "LIVE_TRADING_CONFIRMED"
 
 
-def build_order_payload(symbol: str, side: str, quantity: float, order_type: str, price: float | None = None) -> dict[str, Any]:
+def build_order_payload(
+    symbol: str,
+    side: str,
+    quantity: float,
+    order_type: str,
+    price: float | None = None,
+    reduce_only: bool = False,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "symbol": symbol,
         "side": side.upper(),
@@ -21,6 +28,8 @@ def build_order_payload(symbol: str, side: str, quantity: float, order_type: str
             raise ValueError("LIMIT order requires price")
         payload["price"] = price
         payload["timeInForce"] = "GTC"
+    if reduce_only:
+        payload["reduceOnly"] = True
     return payload
 
 
@@ -36,4 +45,3 @@ def place_order(
         return {"dry_run": True, "market": market, "payload": payload}
     path = "/fapi/v1/order" if market == "futures" else "/api/v3/order"
     return client.signed_post(market, path, payload)
-

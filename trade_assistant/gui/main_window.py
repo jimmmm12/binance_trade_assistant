@@ -53,6 +53,7 @@ from trade_assistant.portfolio import (
     read_real_futures_position,
     read_real_spot_position,
 )
+from trade_assistant.position_manager import ManagedPosition, PositionManagementDecision
 from trade_assistant.realtime_monitor import MonitorResult, MonitorTarget, evaluate_monitor_target
 from trade_assistant.report import trade_plan_to_markdown
 from trade_assistant.risk_engine import PlanRiskReview, account_read_failed_guard, daily_loss_guard
@@ -375,6 +376,8 @@ class MainWindow(QMainWindow):
         self.auto_equity_spin.setRange(10, 1_000_000_000)
         self.auto_equity_spin.setDecimals(2)
         self.auto_equity_spin.setValue(1000)
+        self.auto_detect_account_checkbox = QCheckBox("自动识别本金和仓位")
+        self.auto_detect_account_checkbox.setChecked(True)
         self.auto_execution_combo = QComboBox()
         self._add_combo_choices(self.auto_execution_combo, AUTO_EXECUTION_CHOICES)
         self._set_combo_data(self.auto_execution_combo, AUTO_EXECUTION_SIMULATE)
@@ -387,6 +390,7 @@ class MainWindow(QMainWindow):
         controls.addRow("候选数量", self.auto_top_spin)
         controls.addRow("循环间隔", self.auto_interval_spin)
         controls.addRow("本轮本金", self.auto_equity_spin)
+        controls.addRow("账户识别", self.auto_detect_account_checkbox)
         controls.addRow("执行方式", self.auto_execution_combo)
         controls.addRow("真仓确认", self.auto_live_confirm_input)
         layout.addWidget(controls_group)
@@ -413,6 +417,9 @@ class MainWindow(QMainWindow):
         self.auto_state_label = QLabel("状态机：空仓观察")
         self.auto_state_label.setWordWrap(True)
         layout.addWidget(self.auto_state_label)
+        self.auto_account_label = QLabel("账户识别：等待自动启动")
+        self.auto_account_label.setWordWrap(True)
+        layout.addWidget(self.auto_account_label)
 
         self.auto_log_table = QTableWidget(0, 5)
         self.auto_log_table.setHorizontalHeaderLabels(["时间", "状态", "交易对", "动作", "说明"])
@@ -790,6 +797,7 @@ class MainWindow(QMainWindow):
             max_daily_loss_pct=float(settings.get("daily_loss_stop_pct", 2.0)),
             execution_mode=execution_mode,
             live_confirm=self.auto_live_confirm_input.text().strip(),
+            auto_detect_account=self.auto_detect_account_checkbox.isChecked(),
         )
         worker = FunctionWorker(self._run_auto_trade_worker, config)
         worker.signals.result.connect(self.auto_trade_cycle_finished)
@@ -812,6 +820,11 @@ class MainWindow(QMainWindow):
                 market_fresh_fn=self._auto_market_fresh,
                 live_status_fn=self._auto_live_status,
                 live_order_fn=lambda plan, side: self._auto_live_order(plan, side, config.live_confirm),
+                position_order_fn=lambda managed, decision: self._auto_position_order(
+                    managed, decision, config.live_confirm
+                ),
+                managed_positions_fn=lambda: self._auto_managed_positions(config.execution_mode or AUTO_EXECUTION_PLAN),
+                account_equity_fn=lambda: self._auto_account_equity(config.execution_mode or AUTO_EXECUTION_PLAN),
                 real_position_fn=self._auto_real_position,
             )
         except MarketDataUnavailable as exc:
@@ -845,6 +858,10 @@ class MainWindow(QMainWindow):
         self._append_auto_log(decision.action, symbol, "自动循环", decision.message)
         self.auto_state_label.setText(f"状态机：{decision.state_path}")
         self.auto_status_label.setText(decision.message)
+        equity = decision.plan.equity if decision.plan is not None else self.auto_equity_spin.value()
+        self.auto_account_label.setText(
+            f"账户识别：{'自动' if self.auto_detect_account_checkbox.isChecked() else '手动'}，本轮本金 {equity:.2f}"
+        )
         self.append_log(f"自动交易：{decision.message}")
         if decision.plan is not None:
             self.current_plan = decision.plan
@@ -920,6 +937,69 @@ class MainWindow(QMainWindow):
             allow_live=True,
             confirm=confirm,
         )
+
+    def _auto_position_order(
+        self,
+        managed: ManagedPosition,
+        decision: PositionManagementDecision,
+        confirm: str,
+    ) -> dict:
+        position = managed.position
+        return order_from_form(
+            position.market,
+            position.symbol,
+            decision.exit_side,
+            f"{decision.quantity:.8f}",
+            "MARKET",
+            "",
+            allow_live=True,
+            confirm=confirm,
+            reduce_only=True,
+        )
+
+    def _auto_account_equity(self, execution_mode: str) -> float:
+        if execution_mode == AUTO_EXECUTION_LIVE:
+            from trade_assistant.binance_client import BinanceClient
+
+            risk = read_futures_account_risk(BinanceClient())
+            equity = risk.wallet_balance + risk.total_unrealized_pnl
+            return equity if equity > 0 else risk.wallet_balance
+        portfolio = SimulatedPortfolio()
+        cash = portfolio.cash_balance()
+        unrealized = sum(float(record["unrealized_pnl"]) for record in portfolio.position_records())
+        return max(0.0, cash + unrealized)
+
+    def _auto_managed_positions(self, execution_mode: str) -> list[ManagedPosition]:
+        records = SimulatedPortfolio().position_records()
+        record_map = {(row["source"], row["market"], row["symbol"]): row for row in records}
+        if execution_mode != AUTO_EXECUTION_LIVE:
+            return [
+                ManagedPosition(
+                    position=SimulatedPortfolio().get_position(row["market"], row["symbol"], float(row["mark_price"])),
+                    stop_price=float(row["stop_price"]),
+                    target_price=float(row["target_price"]),
+                    status=str(row["status"]),
+                )
+                for row in records
+                if row["source"] == "simulated" and row["side"] in {"long", "short"} and float(row["quantity"]) > 0
+            ]
+        from trade_assistant.binance_client import BinanceClient
+
+        risk = read_futures_account_risk(BinanceClient())
+        managed: list[ManagedPosition] = []
+        for position in risk.positions:
+            row = record_map.get(("real", position.market, position.symbol)) or record_map.get(
+                ("simulated", position.market, position.symbol)
+            )
+            managed.append(
+                ManagedPosition(
+                    position=position,
+                    stop_price=float(row["stop_price"]) if row else 0.0,
+                    target_price=float(row["target_price"]) if row else 0.0,
+                    status=str(row["status"]) if row else "真实持仓",
+                )
+            )
+        return managed
 
     def _auto_real_position(self, signal: ScoredSignal):
         from trade_assistant.binance_client import BinanceClient

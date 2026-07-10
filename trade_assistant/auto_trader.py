@@ -9,6 +9,7 @@ from .automation_state import AutoTradeState, AutoTradeStateMachine
 from .gui.services import auto_plan_prices, evaluate_plan_from_form, simulate_order_from_form
 from .models import PositionSnapshot, ScoredSignal, TradePlan
 from .portfolio import SimulatedPortfolio
+from .position_manager import ManagedPosition, PositionManagementDecision, manage_position
 from .risk_engine import PlanRiskReview, daily_loss_guard
 
 
@@ -30,6 +31,7 @@ class AutoTradeConfig:
     max_daily_loss_pct: float = 2.0
     execution_mode: str | None = None
     live_confirm: str = ""
+    auto_detect_account: bool = True
 
 
 @dataclass(frozen=True)
@@ -58,12 +60,48 @@ def run_auto_cycle(
     market_fresh_fn: Callable[[ScoredSignal], tuple[bool, str]] | None = None,
     live_status_fn: Callable[[], tuple[bool, str]] | None = None,
     live_order_fn: Callable[[TradePlan, str], dict] | None = None,
+    position_order_fn: Callable[[ManagedPosition, PositionManagementDecision], dict] | None = None,
+    managed_positions_fn: Callable[[], list[ManagedPosition]] | None = None,
+    account_equity_fn: Callable[[], float] | None = None,
     real_position_fn: Callable[[ScoredSignal], PositionSnapshot | None] | None = None,
 ) -> AutoTradeDecision:
     machine = AutoTradeStateMachine()
     execution_mode = _execution_mode(config)
+    equity = _cycle_equity(config, account_equity_fn)
     longs, shorts = scan_fn()
-    signal = select_candidate(longs, shorts)
+    candidates = sorted([*longs, *shorts], key=lambda item: (item.score, item.quote_volume_m), reverse=True)
+    portfolio = SimulatedPortfolio(config.portfolio_path) if config.portfolio_path else SimulatedPortfolio()
+    guard = daily_loss_guard(
+        equity=equity,
+        realized_pnl=portfolio.today_realized_pnl(),
+        stop_pct=config.max_daily_loss_pct,
+    )
+    if not guard.live_allowed:
+        machine.move(AutoTradeState.BLOCKED, guard.message)
+        return _decision(config, machine, "blocked", guard.message, None, None)
+
+    managed_positions = managed_positions_fn() if managed_positions_fn is not None else _simulated_managed_positions(portfolio)
+    management = _best_position_management(managed_positions, candidates)
+    if management is not None:
+        managed, position_decision, signal_for_position = management
+        if position_decision.action in {"close", "reduce", "move_stop"}:
+            return _execute_position_management(
+                config,
+                machine,
+                portfolio,
+                managed,
+                position_decision,
+                signal_for_position,
+                execution_mode,
+                position_order_fn,
+            )
+        if position_decision.action == "add" and signal_for_position is not None:
+            signal = signal_for_position
+        else:
+            signal = _first_new_opportunity(candidates, managed_positions)
+    else:
+        signal = _first_new_opportunity(candidates, managed_positions)
+
     if signal is None:
         return _decision(config, machine, "no_signal", "本轮没有可用信号", None, None)
     machine.move(AutoTradeState.OPPORTUNITY_FOUND, "扫描发现候选信号", signal.symbol)
@@ -73,27 +111,7 @@ def run_auto_cycle(
     if signal.market == "spot" and signal.side == "short" and execution_mode != AUTO_EXECUTION_PLAN:
         machine.move(AutoTradeState.BLOCKED, "现货不允许自动模拟做空", signal.symbol)
         return _decision(config, machine, "blocked", "现货做空信号只观察，不自动卖出", signal, None)
-    portfolio = SimulatedPortfolio(config.portfolio_path) if config.portfolio_path else SimulatedPortfolio()
-    guard = daily_loss_guard(
-        equity=config.equity,
-        realized_pnl=portfolio.today_realized_pnl(),
-        stop_pct=config.max_daily_loss_pct,
-    )
-    if not guard.live_allowed:
-        machine.move(AutoTradeState.BLOCKED, guard.message, signal.symbol)
-        return _decision(config, machine, "blocked", guard.message, signal, None)
     existing = _existing_position_for_mode(execution_mode, signal, portfolio, real_position_fn)
-    if existing.side != "flat" and existing.quantity > 0:
-        machine.move(AutoTradeState.MANAGING, "已有仓位，进入持仓管理，不重复开仓", signal.symbol)
-        return _decision(
-            config,
-            machine,
-            "manage_position",
-            "已有仓位，本轮不重复下单，进入持仓管理",
-            signal,
-            None,
-            position=existing,
-        )
     prices = auto_plan_prices(signal, config.mode)
     if prices.adaptive is not None and not prices.adaptive.allow_live and execution_mode != AUTO_EXECUTION_SIMULATE:
         machine.move(AutoTradeState.BLOCKED, "自适应参数只建议模拟", signal.symbol)
@@ -105,11 +123,11 @@ def run_auto_cycle(
         entry=str(prices.entry),
         stop=str(prices.stop),
         target=str(prices.target),
-        equity=str(config.equity),
+        equity=str(equity),
         risk_pct=str(prices.adaptive.risk_pct if prices.adaptive else 1.0),
         leverage=str(prices.adaptive.suggested_leverage if prices.adaptive else 1.0),
         signal=signal,
-        position=None,
+        position=existing if existing.side != "flat" else None,
         mode=config.mode,
     )
     machine.move(AutoTradeState.PLAN_GENERATED, "已生成交易计划", signal.symbol)
@@ -144,9 +162,11 @@ def run_auto_cycle(
         fallback_price=f"{plan.entry:.8f}",
         portfolio_path=config.portfolio_path,
     )
-    machine.move(AutoTradeState.OPENED, "已模拟开仓", signal.symbol)
+    machine.move(AutoTradeState.OPENED, "已模拟加仓" if existing.side != "flat" else "已模拟开仓", signal.symbol)
     machine.move(AutoTradeState.MANAGING, "进入持仓管理", signal.symbol)
-    return _decision(config, machine, "simulated_order", "已自动生成计划并模拟下单", signal, plan, review, position)
+    action = "simulated_add" if existing.side != "flat" else "simulated_order"
+    message = "已自动评估仓位并模拟加仓" if existing.side != "flat" else "已自动生成计划并模拟下单"
+    return _decision(config, machine, action, message, signal, plan, review, position)
 
 
 def _execution_mode(config: AutoTradeConfig) -> str:
@@ -155,6 +175,16 @@ def _execution_mode(config: AutoTradeConfig) -> str:
     if config.execution_mode not in AUTO_EXECUTION_MODES:
         raise ValueError("execution_mode must be plan, simulate, or live")
     return config.execution_mode
+
+
+def _cycle_equity(config: AutoTradeConfig, account_equity_fn: Callable[[], float] | None) -> float:
+    if not config.auto_detect_account or account_equity_fn is None:
+        return config.equity
+    try:
+        equity = float(account_equity_fn())
+    except Exception:
+        return config.equity
+    return equity if equity > 0 else config.equity
 
 
 def _existing_position_for_mode(
@@ -168,6 +198,173 @@ def _existing_position_for_mode(
         if real is not None:
             return real
     return portfolio.get_position(signal.market, signal.symbol, mark_price=signal.last)
+
+
+def _simulated_managed_positions(portfolio: SimulatedPortfolio) -> list[ManagedPosition]:
+    managed: list[ManagedPosition] = []
+    for record in portfolio.position_records():
+        if record["side"] not in {"long", "short"} or float(record["quantity"]) <= 0:
+            continue
+        position = portfolio.get_position(record["market"], record["symbol"], mark_price=float(record["mark_price"]))
+        managed.append(
+            ManagedPosition(
+                position=position,
+                stop_price=float(record["stop_price"]),
+                target_price=float(record["target_price"]),
+                status=str(record["status"]),
+            )
+        )
+    return managed
+
+
+def _best_position_management(
+    managed_positions: list[ManagedPosition],
+    candidates: list[ScoredSignal],
+) -> tuple[ManagedPosition, PositionManagementDecision, ScoredSignal | None] | None:
+    priority = {"close": 0, "reduce": 1, "move_stop": 2, "add": 3, "hold": 4, "ignore": 5}
+    decisions: list[tuple[int, ManagedPosition, PositionManagementDecision, ScoredSignal | None]] = []
+    for managed in managed_positions:
+        same = _matching_signal(candidates, managed.position, same_side=True)
+        opposite = _matching_signal(candidates, managed.position, same_side=False)
+        decision = manage_position(managed, same_side_signal=same, opposite_signal=opposite)
+        decisions.append((priority.get(decision.action, 9), managed, decision, same))
+    if not decisions:
+        return None
+    decisions.sort(key=lambda item: item[0])
+    _, managed, decision, signal = decisions[0]
+    return managed, decision, signal
+
+
+def _matching_signal(
+    candidates: list[ScoredSignal],
+    position: PositionSnapshot,
+    *,
+    same_side: bool,
+) -> ScoredSignal | None:
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate.market == position.market
+        and candidate.symbol == position.symbol
+        and ((candidate.side == position.side) == same_side)
+    ]
+    return matches[0] if matches else None
+
+
+def _first_new_opportunity(
+    candidates: list[ScoredSignal],
+    managed_positions: list[ManagedPosition],
+) -> ScoredSignal | None:
+    held = {(item.position.market, item.position.symbol) for item in managed_positions if item.position.side != "flat"}
+    for candidate in candidates:
+        if (candidate.market, candidate.symbol) not in held:
+            return candidate
+    return None
+
+
+def _execute_position_management(
+    config: AutoTradeConfig,
+    machine: AutoTradeStateMachine,
+    portfolio: SimulatedPortfolio,
+    managed: ManagedPosition,
+    position_decision: PositionManagementDecision,
+    signal: ScoredSignal | None,
+    execution_mode: str,
+    position_order_fn: Callable[[ManagedPosition, PositionManagementDecision], dict] | None,
+) -> AutoTradeDecision:
+    position = managed.position
+    machine.move(AutoTradeState.MANAGING, position_decision.message, position.symbol)
+    if execution_mode == AUTO_EXECUTION_PLAN:
+        return _decision(
+            config,
+            machine,
+            "position_management",
+            position_decision.message,
+            signal,
+            None,
+            position=position,
+        )
+    if position_decision.action == "move_stop":
+        _update_simulated_position_record(portfolio, managed, position_decision)
+        return _decision(
+            config,
+            machine,
+            "stop_moved",
+            position_decision.message,
+            signal,
+            None,
+            position=position,
+        )
+    if execution_mode == AUTO_EXECUTION_SIMULATE:
+        _, updated = simulate_order_from_form(
+            market=position.market,
+            symbol=position.symbol,
+            side=position_decision.exit_side,
+            quantity=f"{position_decision.quantity:.8f}",
+            order_type="MARKET",
+            price=f"{position.mark_price:.8f}",
+            fallback_price=f"{position.mark_price:.8f}",
+            portfolio_path=config.portfolio_path,
+        )
+        _update_simulated_position_record(portfolio, managed, position_decision)
+        return _decision(
+            config,
+            machine,
+            "position_reduced" if position_decision.action == "reduce" else "position_closed",
+            position_decision.message,
+            signal,
+            None,
+            position=updated,
+        )
+    if position_order_fn is None:
+        machine.move(AutoTradeState.BLOCKED, "自动真仓仓位管理通道未配置", position.symbol)
+        return _decision(config, machine, "blocked", "自动真仓仓位管理通道未配置", signal, None, position=position)
+    from .broker import LIVE_CONFIRMATION
+
+    if config.live_confirm != LIVE_CONFIRMATION:
+        machine.move(AutoTradeState.BLOCKED, "自动真仓仓位管理确认文字不匹配", position.symbol)
+        return _decision(config, machine, "blocked", "自动真仓仓位管理确认文字不匹配", signal, None, position=position)
+    result = position_order_fn(managed, position_decision)
+    if result.get("dry_run"):
+        machine.move(AutoTradeState.BLOCKED, "自动真仓仓位管理未真正发送订单", position.symbol)
+        return _decision(config, machine, "blocked", "自动真仓仓位管理未真正发送订单", signal, None, position=position)
+    return _decision(
+        config,
+        machine,
+        "live_position_reduced" if position_decision.action == "reduce" else "live_position_closed",
+        position_decision.message,
+        signal,
+        None,
+        position=position,
+    )
+
+
+def _update_simulated_position_record(
+    portfolio: SimulatedPortfolio,
+    managed: ManagedPosition,
+    position_decision: PositionManagementDecision,
+) -> None:
+    position = managed.position
+    stop = position_decision.new_stop if position_decision.new_stop is not None else managed.stop_price
+    status = position_decision.status or managed.status
+    quantity = position.quantity
+    if position_decision.action in {"reduce", "close"}:
+        quantity = max(0.0, position.quantity - position_decision.quantity)
+    if quantity <= 0:
+        status = position_decision.status or "已平仓"
+    portfolio.upsert_position_record(
+        source=position.source,
+        market=position.market,
+        symbol=position.symbol,
+        side=position.side,
+        quantity=quantity,
+        entry_price=position.entry_price,
+        mark_price=position.mark_price,
+        stop_price=stop,
+        target_price=managed.target_price,
+        realized_pnl=position.realized_pnl,
+        status=status,
+    )
 
 
 def _run_live_order(

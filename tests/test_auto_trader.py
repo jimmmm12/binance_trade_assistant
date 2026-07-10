@@ -121,9 +121,92 @@ def test_auto_cycle_does_not_repeat_order_when_position_exists(tmp_path) -> None
 
     decision = run_auto_cycle(config, scan_fn=lambda: ([_scored("UNIUSDT", 86)], []))
 
-    assert decision.action == "manage_position"
+    assert decision.action == "simulated_add"
     assert decision.position is not None
-    assert decision.position.quantity == 1
+    assert decision.position.quantity > 1
+
+
+def test_auto_cycle_holds_existing_position_without_rebuying_when_signal_is_not_add(tmp_path) -> None:
+    db_path = tmp_path / "auto.db"
+    portfolio = SimulatedPortfolio(db_path)
+    portfolio.apply_fill("futures", "UNIUSDT", "BUY", 1, 10)
+    portfolio.upsert_position_record(
+        source="simulated",
+        market="futures",
+        symbol="UNIUSDT",
+        side="long",
+        quantity=1,
+        entry_price=10,
+        mark_price=10.1,
+        stop_price=9,
+        target_price=12,
+        status="模拟持仓",
+    )
+    config = AutoTradeConfig(
+        market="futures",
+        mode="intraday",
+        top=5,
+        auto_simulate=True,
+        portfolio_path=db_path,
+        automation_log_path=tmp_path / "events.jsonl",
+    )
+
+    decision = run_auto_cycle(config, scan_fn=lambda: ([_scored("UNIUSDT", 72)], []))
+
+    assert decision.action == "no_signal"
+    assert portfolio.get_position("futures", "UNIUSDT").quantity == 1
+
+
+def test_auto_cycle_reduces_weak_existing_position(tmp_path) -> None:
+    db_path = tmp_path / "auto.db"
+    portfolio = SimulatedPortfolio(db_path)
+    portfolio.apply_fill("futures", "UNIUSDT", "BUY", 1, 10)
+    portfolio.upsert_position_record(
+        source="simulated",
+        market="futures",
+        symbol="UNIUSDT",
+        side="long",
+        quantity=1,
+        entry_price=10,
+        mark_price=9.8,
+        stop_price=9,
+        target_price=12,
+        status="模拟持仓",
+    )
+    config = AutoTradeConfig(
+        market="futures",
+        mode="intraday",
+        top=5,
+        auto_simulate=True,
+        portfolio_path=db_path,
+        automation_log_path=tmp_path / "events.jsonl",
+    )
+
+    decision = run_auto_cycle(config, scan_fn=lambda: ([_scored("UNIUSDT", 52)], []))
+
+    assert decision.action == "position_reduced"
+    assert portfolio.get_position("futures", "UNIUSDT").quantity == 0.5
+
+
+def test_auto_cycle_uses_detected_account_equity_for_plan(tmp_path) -> None:
+    config = AutoTradeConfig(
+        market="futures",
+        mode="intraday",
+        top=5,
+        auto_simulate=False,
+        auto_detect_account=True,
+        portfolio_path=tmp_path / "auto.db",
+        automation_log_path=tmp_path / "events.jsonl",
+    )
+
+    decision = run_auto_cycle(
+        config,
+        scan_fn=lambda: ([_scored("UNIUSDT", 86)], []),
+        account_equity_fn=lambda: 2500.0,
+    )
+
+    assert decision.plan is not None
+    assert decision.plan.equity == 2500.0
 
 
 def test_auto_cycle_blocks_low_score_live_plan_when_not_simulating(tmp_path) -> None:

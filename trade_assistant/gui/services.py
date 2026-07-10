@@ -344,6 +344,7 @@ def order_from_form(
     allow_live: bool,
     confirm: str,
     *,
+    reduce_only: bool = False,
     client: BinanceClient | None = None,
     place_order_fn: Callable[[BinanceClient | Any, str, dict[str, Any], bool, str | None], dict[str, Any]] = place_order,
 ) -> dict[str, Any]:
@@ -354,6 +355,7 @@ def order_from_form(
         quantity=float(quantity),
         order_type=order_type,
         price=parsed_price,
+        reduce_only=reduce_only and market == "futures",
     )
     order_client = client or BinanceClient()
     return place_order_fn(order_client, market, payload, allow_live, confirm or None)
