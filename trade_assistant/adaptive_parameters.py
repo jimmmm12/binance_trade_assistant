@@ -22,11 +22,13 @@ def adapt_parameters(
     signal: Signal,
     mode: str,
     backtest: BacktestResult | None = None,
+    base_risk_pct: float = 1.0,
 ) -> AdaptiveParameters:
     atr = _mode_atr(signal, mode)
+    base_risk_pct = max(0.0, float(base_risk_pct))
     atr_multiplier = 1.8 if mode == "swing" else 1.4
     reward_risk = 2.2 if mode == "swing" else 1.8
-    risk_pct = 1.0
+    risk_pct = base_risk_pct
     allow_live = True
     reasons: list[str] = []
     warnings: list[str] = []
@@ -35,7 +37,7 @@ def adapt_parameters(
         reasons.append("流动性充足")
     elif signal.quote_volume_m < 50:
         warnings.append("流动性不足，降低仓位")
-        risk_pct = min(risk_pct, 0.5)
+        risk_pct = min(risk_pct, base_risk_pct * 0.5)
         allow_live = False
 
     high_atr = 8.0 if mode == "swing" else 4.0
@@ -43,29 +45,29 @@ def adapt_parameters(
     if atr >= high_atr:
         warnings.append("波动偏大，放宽止损并降低仓位")
         atr_multiplier += 0.4
-        risk_pct = min(risk_pct, 0.5)
+        risk_pct = min(risk_pct, base_risk_pct * 0.5)
     if atr >= extreme_atr:
         warnings.append("波动极端，只建议模拟观察")
-        risk_pct = min(risk_pct, 0.3)
+        risk_pct = min(risk_pct, base_risk_pct * 0.3)
         allow_live = False
 
     if signal.funding_pct is not None and abs(signal.funding_pct) >= 0.08:
         warnings.append("资金费率拥挤，降低追单风险")
-        risk_pct = min(risk_pct, 0.4)
+        risk_pct = min(risk_pct, base_risk_pct * 0.4)
         allow_live = False
 
     if signal.side == "long" and signal.rsi_1h >= 78:
         warnings.append("RSI过热，降低做多风险")
-        risk_pct = min(risk_pct, 0.5)
+        risk_pct = min(risk_pct, base_risk_pct * 0.5)
     if signal.side == "short" and signal.rsi_1h <= 22:
         warnings.append("RSI过冷，降低做空风险")
-        risk_pct = min(risk_pct, 0.5)
+        risk_pct = min(risk_pct, base_risk_pct * 0.5)
 
     if backtest is not None:
         if backtest.trades >= 20 and (backtest.win_rate < 40 or backtest.average_r <= 0):
             warnings.append("近期回测表现差，降低目标和仓位")
             reward_risk = 1.5 if mode == "swing" else 1.3
-            risk_pct = min(risk_pct, 0.5)
+            risk_pct = min(risk_pct, base_risk_pct * 0.5)
             allow_live = False
         elif backtest.trades >= 20 and backtest.win_rate >= 55 and backtest.average_r > 0.2:
             reasons.append("近期回测表现较好")

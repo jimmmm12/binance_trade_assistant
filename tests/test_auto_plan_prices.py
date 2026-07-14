@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from trade_assistant.gui.services import auto_plan_prices
 from trade_assistant.models import Signal
+from trade_assistant.strategy_scoring import score_signal
 
 
 def _signal(side: str = "long", atr_pct: float | None = 2.0) -> Signal:
@@ -33,7 +34,7 @@ def test_auto_plan_prices_uses_atr_for_intraday_long_stop_and_target() -> None:
     assert plan.stop_pct == 2.8
     assert plan.reward_risk == 1.8
     assert "ATR 2.00%" in plan.risk_note
-    assert "自适应风险" in plan.risk_note
+    assert "动态风险" in plan.risk_note
     assert plan.warning is None
     assert plan.adaptive is not None
 
@@ -52,3 +53,14 @@ def test_auto_plan_prices_warns_when_volatility_is_too_high() -> None:
 
     assert plan.stop_pct == 9.0
     assert "波动" in plan.warning
+
+
+def test_b_grade_score_reduces_risk_size_to_configured_stage_multiplier() -> None:
+    scored = score_signal(_signal("long", atr_pct=2.0), "intraday", 1.0, 1.0)
+
+    plan = auto_plan_prices(scored, "intraday")
+
+    assert scored.breakdown.grade == "B"
+    assert plan.adaptive is not None
+    assert plan.adaptive.risk_pct == 0.28
+    assert "阶段 40%" in plan.risk_note

@@ -1,5 +1,7 @@
 # Binance Trade Assistant
 
+交易系统内核、状态恢复、订单生命周期和风控说明见：`docs/trading-system-architecture.md`。
+
 A local Binance spot/futures trade assistant with VeighNa-friendly structure.
 
 It can:
@@ -47,7 +49,7 @@ Live order placement requires all of these:
 $env:BINANCE_API_KEY="..."
 $env:BINANCE_API_SECRET="..."
 $env:BINANCE_ENABLE_LIVE_TRADING="true"
-python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type MARKET --allow-live --confirm LIVE_TRADING_CONFIRMED
+python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type MARKET --allow-live --confirm 确认下单
 ```
 
 Use API keys with the smallest permissions possible. Do not enable withdrawals.
@@ -100,5 +102,5 @@ Live trading remains locked unless all safety switches are enabled:
 BINANCE_API_KEY
 BINANCE_API_SECRET
 BINANCE_ENABLE_LIVE_TRADING=true
-LIVE_TRADING_CONFIRMED
+确认下单
 ```

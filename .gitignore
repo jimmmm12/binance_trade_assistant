@@ -20,6 +20,10 @@ reports/
 *.sqlite
 *.sqlite3
 
+# Protected local research dataset. Keep its schema/protection files, never generated records.
+/research_dataset/decisions/
+/research_dataset/outcomes/
+
 # Build and packaged executable outputs
 build/
 dist/

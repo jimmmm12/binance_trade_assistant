@@ -10,7 +10,7 @@ set BINANCE_API_KEY=PUT_YOUR_API_KEY_HERE
 set BINANCE_API_SECRET=PUT_YOUR_API_SECRET_HERE
 set BINANCE_ENABLE_LIVE_TRADING=true
 
-python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type MARKET --allow-live --confirm LIVE_TRADING_CONFIRMED
+python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type MARKET --allow-live --confirm 确认下单
 
 echo.
 pause

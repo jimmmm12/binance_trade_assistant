@@ -45,6 +45,11 @@ def write_scan_report(longs: list[Signal | ScoredSignal], shorts: list[Signal | 
             "交易对",
             "方向",
             "分数",
+            "等级",
+            "市场状态",
+            "策略",
+            "置信度",
+            "风险系数",
             "最新价",
             "24h涨跌幅",
             "成交额_百万",
@@ -54,14 +59,12 @@ def write_scan_report(longs: list[Signal | ScoredSignal], shorts: list[Signal | 
             "24h动量",
             "3日动量",
             "资金费率",
-            "流动性分",
             "趋势分",
+            "动量分",
             "量能分",
-            "强弱分",
-            "风险分",
-            "资金费率分",
-            "波动分",
-            "仓位冲突分",
+            "位置分",
+            "大周期分",
+            "市场环境分",
             "综合建议",
             "入选原因",
             "风险提示",
@@ -76,8 +79,8 @@ def write_scan_report(longs: list[Signal | ScoredSignal], shorts: list[Signal | 
 
 def _signal_section(title: str, signals: list[Signal | ScoredSignal]) -> list[str]:
     lines = [f"## {title}", ""]
-    lines.append("| 市场 | 交易对 | 方向 | 分数 | 最新价 | 24h涨跌 | 成交额(百万) | RSI 1h | RSI 4h | 成交量倍数 | 24h动量 | 3日动量 | 资金费率 | 综合建议 | 入选原因 | 风险提示 | 备注 |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|")
+    lines.append("| 市场 | 交易对 | 方向 | 分数 | 等级/风险 | 市场状态 | 策略 | 六维评分 | 最新价 | 24h涨跌 | 成交额(百万) | RSI 1h | RSI 4h | 成交量倍数 | 资金费率 | 综合建议 | 入选原因 | 风险提示 |")
+    lines.append("|---|---|---:|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|")
     for item in signals:
         signal = _base_signal(item)
         side = "做多" if signal.side == "long" else "做空"
@@ -85,6 +88,15 @@ def _signal_section(title: str, signals: list[Signal | ScoredSignal]) -> list[st
         reasons = "；".join(item.reasons) if isinstance(item, ScoredSignal) else ""
         warnings = "；".join(item.warnings) if isinstance(item, ScoredSignal) else ""
         recommendation = item.breakdown.recommendation if isinstance(item, ScoredSignal) else "等待确认"
+        grade_risk = "旧版"
+        score_detail = "-"
+        if isinstance(item, ScoredSignal):
+            detail = item.breakdown
+            grade_risk = f"{detail.grade} / {detail.position_multiplier:.0%}"
+            score_detail = (
+                f"趋势{detail.trend}/动量{detail.momentum}/量能{detail.volume}/"
+                f"位置{detail.positioning}/周期{detail.timeframe}/环境{detail.regime}"
+            )
         lines.append(
             "| "
             + " | ".join(
@@ -93,19 +105,20 @@ def _signal_section(title: str, signals: list[Signal | ScoredSignal]) -> list[st
                     signal.symbol,
                     side,
                     str(item.score),
+                    grade_risk,
+                    item.breakdown.market_regime if isinstance(item, ScoredSignal) else "-",
+                    item.breakdown.selected_strategy if isinstance(item, ScoredSignal) else "-",
+                    score_detail,
                     fmt(signal.last, 8),
                     fmt(signal.change_24h, 2),
                     fmt(signal.quote_volume_m, 0),
                     fmt(signal.rsi_1h, 1),
                     fmt(signal.rsi_4h, 1),
                     fmt(signal.volume_ratio, 2),
-                    fmt(signal.momentum_24h, 2),
-                    fmt(signal.momentum_3d, 2),
                     fmt(signal.funding_pct, 4),
                     recommendation,
                     reasons,
                     warnings,
-                    signal.note,
                 ]
             )
             + " |"
@@ -121,6 +134,11 @@ def _signal_csv_row(signal: Signal | ScoredSignal) -> dict[str, str | float | in
         "交易对": base.symbol,
         "方向": "做多" if base.side == "long" else "做空",
         "分数": signal.score,
+        "等级": "" if breakdown is None else breakdown.grade,
+        "市场状态": "" if breakdown is None else breakdown.market_regime,
+        "策略": "" if breakdown is None else breakdown.selected_strategy,
+        "置信度": "" if breakdown is None else breakdown.confidence,
+        "风险系数": "" if breakdown is None else breakdown.position_multiplier,
         "最新价": base.last,
         "24h涨跌幅": base.change_24h,
         "成交额_百万": base.quote_volume_m,
@@ -130,14 +148,12 @@ def _signal_csv_row(signal: Signal | ScoredSignal) -> dict[str, str | float | in
         "24h动量": base.momentum_24h,
         "3日动量": base.momentum_3d,
         "资金费率": "" if base.funding_pct is None else base.funding_pct,
-        "流动性分": "" if breakdown is None else breakdown.liquidity,
         "趋势分": "" if breakdown is None else breakdown.trend,
+        "动量分": "" if breakdown is None else breakdown.momentum,
         "量能分": "" if breakdown is None else breakdown.volume,
-        "强弱分": "" if breakdown is None else breakdown.relative_strength,
-        "风险分": "" if breakdown is None else breakdown.risk,
-        "资金费率分": "" if breakdown is None else breakdown.funding,
-        "波动分": "" if breakdown is None else breakdown.volatility,
-        "仓位冲突分": "" if breakdown is None else breakdown.position,
+        "位置分": "" if breakdown is None else breakdown.positioning,
+        "大周期分": "" if breakdown is None else breakdown.timeframe,
+        "市场环境分": "" if breakdown is None else breakdown.regime,
         "综合建议": "" if breakdown is None else breakdown.recommendation,
         "入选原因": "" if breakdown is None else "；".join(breakdown.reasons),
         "风险提示": "" if breakdown is None else "；".join(breakdown.warnings),

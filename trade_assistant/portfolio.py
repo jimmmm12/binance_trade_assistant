@@ -4,13 +4,27 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from .main import ROOT
+from .main import ROOT, load_settings
 from .models import FuturesAccountRisk, PositionSnapshot
 
 
-DEFAULT_SIM_BALANCE = 10000.0
+LEGACY_DEFAULT_SIM_BALANCE = 10000.0
+DEFAULT_SIM_BALANCE = 1000.0
 DEFAULT_DB_PATH = ROOT / "data" / "sim_account.db"
 REAL_LOSS_INCOME_TYPES = {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}
+POSITION_EPSILON = 1e-8
+
+
+def is_flat_quantity(quantity: float) -> bool:
+    return abs(float(quantity)) <= POSITION_EPSILON
+
+
+def configured_default_sim_balance() -> float:
+    try:
+        value = float(load_settings().get("default_equity", DEFAULT_SIM_BALANCE))
+    except Exception:
+        return DEFAULT_SIM_BALANCE
+    return value if value > 0 else DEFAULT_SIM_BALANCE
 
 
 def today_window_ms() -> tuple[int, int]:
@@ -82,7 +96,7 @@ def normalize_futures_position(rows: list[dict], symbol: str) -> PositionSnapsho
         if row.get("symbol") != symbol.upper():
             continue
         amount = float(row.get("positionAmt", 0))
-        if amount == 0:
+        if is_flat_quantity(amount):
             return flat_position("real", "futures", symbol, float(row.get("markPrice", 0)))
         quantity = abs(amount)
         mark_price = float(row.get("markPrice", 0))
@@ -115,20 +129,48 @@ def read_real_futures_position(client, symbol: str) -> PositionSnapshot:
 
 
 def read_futures_account_risk(client) -> FuturesAccountRisk:
-    return normalize_futures_account_risk(client.futures_account_balance(), client.futures_positions())
+    position_rows = client.futures_positions()
+    if hasattr(client, "futures_account"):
+        try:
+            return normalize_futures_account_risk(
+                client.futures_account(),
+                position_rows,
+                balance_rows=client.futures_account_balance(),
+            )
+        except Exception:
+            pass
+    return normalize_futures_account_risk(client.futures_account_balance(), position_rows)
 
 
-def normalize_futures_account_risk(balance_rows: list[dict], position_rows: list[dict]) -> FuturesAccountRisk:
-    usdt = next((row for row in balance_rows if row.get("asset") == "USDT"), {})
+def normalize_futures_account_risk(
+    account_or_balance: dict | list[dict] | None = None,
+    position_rows: list[dict] | None = None,
+    balance_rows: list[dict] | None = None,
+) -> FuturesAccountRisk:
+    position_rows = position_rows or []
+    account_payload = account_or_balance if isinstance(account_or_balance, dict) else {}
+    balance_payload = balance_rows if balance_rows is not None else (
+        account_or_balance if isinstance(account_or_balance, list) else []
+    )
+    usdt = next((row for row in balance_payload if row.get("asset") == "USDT"), {})
     positions = [
         normalize_futures_position([row], row.get("symbol", ""))
         for row in position_rows
         if float(row.get("positionAmt", 0)) != 0
     ]
+    total_wallet = _optional_float(account_payload.get("totalWalletBalance"))
+    total_margin = _optional_float(account_payload.get("totalMarginBalance"))
+    wallet_balance = _first_positive_float(total_wallet, usdt.get("balance"), total_margin)
+    available_balance = _first_positive_float(account_payload.get("availableBalance"), usdt.get("availableBalance"))
+    unrealized = _optional_float(account_payload.get("totalUnrealizedProfit"))
+    if unrealized is None:
+        unrealized = sum(position.unrealized_pnl for position in positions)
+    if (total_wallet is None or total_wallet <= 0) and total_margin is not None and total_margin > 0:
+        unrealized = 0.0
     return FuturesAccountRisk(
-        wallet_balance=float(usdt.get("balance", 0)),
-        available_balance=float(usdt.get("availableBalance", 0)),
-        total_unrealized_pnl=sum(position.unrealized_pnl for position in positions),
+        wallet_balance=wallet_balance,
+        available_balance=available_balance,
+        total_unrealized_pnl=unrealized,
         positions=positions,
     )
 
@@ -137,6 +179,14 @@ def _optional_float(value) -> float | None:
     if value in (None, "", "0", 0):
         return None
     return float(value)
+
+
+def _first_positive_float(*values) -> float:
+    for value in values:
+        parsed = _optional_float(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    return 0.0
 
 
 class SimulatedPortfolio:
@@ -194,6 +244,7 @@ class SimulatedPortfolio:
                     mark_price REAL NOT NULL,
                     stop_price REAL NOT NULL,
                     target_price REAL NOT NULL,
+                    leverage REAL NOT NULL DEFAULT 1,
                     realized_pnl REAL NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -201,15 +252,46 @@ class SimulatedPortfolio:
                 )
                 """
             )
+            self._ensure_position_record_columns(conn)
             row = conn.execute("SELECT balance FROM sim_account WHERE asset = 'USDT'").fetchone()
             if row is None:
-                conn.execute("INSERT INTO sim_account(asset, balance) VALUES('USDT', ?)", (DEFAULT_SIM_BALANCE,))
+                conn.execute(
+                    "INSERT INTO sim_account(asset, balance) VALUES('USDT', ?)",
+                    (configured_default_sim_balance(),),
+                )
+            else:
+                self._migrate_legacy_default_balance(conn, float(row["balance"]))
+
+    def _ensure_position_record_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(position_records)").fetchall()
+        }
+        if "leverage" not in columns:
+            conn.execute("ALTER TABLE position_records ADD COLUMN leverage REAL NOT NULL DEFAULT 1")
+
+    def _migrate_legacy_default_balance(self, conn: sqlite3.Connection, balance: float) -> None:
+        if abs(balance - LEGACY_DEFAULT_SIM_BALANCE) > POSITION_EPSILON:
+            return
+        open_position = conn.execute("SELECT 1 FROM sim_positions LIMIT 1").fetchone()
+        if open_position is not None:
+            return
+        default_balance = configured_default_sim_balance()
+        if abs(default_balance - balance) <= POSITION_EPSILON:
+            return
+        conn.execute("UPDATE sim_account SET balance = ? WHERE asset = 'USDT'", (default_balance,))
 
     def cash_balance(self, asset: str = "USDT") -> float:
         self.initialize()
         with self._connect() as conn:
             row = conn.execute("SELECT balance FROM sim_account WHERE asset = ?", (asset,)).fetchone()
         return float(row["balance"]) if row else 0.0
+
+    def fill_count(self) -> int:
+        self.initialize()
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM sim_fills").fetchone()
+        return int(row["count"] or 0)
 
     def today_realized_pnl(self) -> float:
         self.initialize()
@@ -255,6 +337,7 @@ class SimulatedPortfolio:
         mark_price: float,
         stop_price: float,
         target_price: float,
+        leverage: float = 1.0,
         realized_pnl: float = 0.0,
         status: str = "计划中",
     ) -> None:
@@ -265,9 +348,9 @@ class SimulatedPortfolio:
                 """
                 INSERT INTO position_records(
                     source, market, symbol, side, quantity, entry_price, mark_price,
-                    stop_price, target_price, realized_pnl, status, updated_at
+                    stop_price, target_price, leverage, realized_pnl, status, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source, market, symbol) DO UPDATE SET
                     side = excluded.side,
                     quantity = excluded.quantity,
@@ -275,6 +358,7 @@ class SimulatedPortfolio:
                     mark_price = excluded.mark_price,
                     stop_price = excluded.stop_price,
                     target_price = excluded.target_price,
+                    leverage = excluded.leverage,
                     realized_pnl = excluded.realized_pnl,
                     status = excluded.status,
                     updated_at = excluded.updated_at
@@ -289,20 +373,35 @@ class SimulatedPortfolio:
                     mark_price,
                     stop_price,
                     target_price,
+                    max(1.0, float(leverage or 1.0)),
                     realized_pnl,
                     status,
                     now,
                 ),
             )
 
-    def position_records(self) -> list[dict]:
+    def position_records(self, active_only: bool = True, source: str | None = None) -> list[dict]:
         self.initialize()
+        conditions: list[str] = []
+        params: list[object] = []
+        if active_only:
+            conditions.append("quantity > ?")
+            conditions.append("side != 'flat'")
+            conditions.append("status NOT LIKE ?")
+            params.append(POSITION_EPSILON)
+            params.append("%计划%")
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
         with self._connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM position_records
+                {where}
                 ORDER BY updated_at DESC
-                """
+                """,
+                tuple(params),
             ).fetchall()
         records: list[dict] = []
         for row in rows:
@@ -314,6 +413,34 @@ class SimulatedPortfolio:
             )
             records.append(record)
         return records
+
+    def open_position_count(self) -> int:
+        self.initialize()
+        with self._connect() as conn:
+            sim_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM sim_positions WHERE quantity > ?",
+                (POSITION_EPSILON,),
+            ).fetchone()
+            record_row = conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM position_records
+                WHERE source = 'simulated' AND quantity > ? AND side != 'flat'
+                """,
+                (POSITION_EPSILON,),
+            ).fetchone()
+        return int(sim_row["count"] or 0) + int(record_row["count"] or 0)
+
+    def simulated_residue_count(self) -> int:
+        self.initialize()
+        with self._connect() as conn:
+            sim_row = conn.execute("SELECT COUNT(*) AS count FROM sim_positions").fetchone()
+            record_row = conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM position_records
+                WHERE source = 'simulated' AND (ABS(quantity) > 0 OR side != 'flat')
+                """
+            ).fetchone()
+        return int(sim_row["count"] or 0) + int(record_row["count"] or 0)
 
     def update_position_record_mark_price(self, source: str, market: str, symbol: str, mark_price: float) -> None:
         self.initialize()
@@ -327,6 +454,82 @@ class SimulatedPortfolio:
                 """,
                 (mark_price, now, source, market, symbol.upper()),
             )
+
+    def close_position_record(self, source: str, market: str, symbol: str, mark_price: float = 0.0) -> None:
+        self.initialize()
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE position_records
+                SET side = 'flat',
+                    quantity = 0,
+                    mark_price = ?,
+                    status = '已平仓/空仓',
+                    updated_at = ?
+                WHERE source = ? AND market = ? AND symbol = ?
+                """,
+                (mark_price, now, source, market, symbol.upper()),
+            )
+
+    def clear_all_positions(self) -> int:
+        """Close every local simulated position at its latest recorded mark price."""
+        self.initialize()
+        with self._connect() as conn:
+            positions = [dict(row) for row in conn.execute("SELECT * FROM sim_positions").fetchall()]
+            records = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT * FROM position_records
+                    WHERE source = 'simulated' AND (ABS(quantity) > 0 OR side != 'flat')
+                    """,
+                ).fetchall()
+            ]
+
+        mark_prices = {
+            (record["market"], str(record["symbol"]).upper()): float(record["mark_price"] or record["entry_price"] or 0)
+            for record in records
+        }
+        cleared = 0
+        closed_keys: set[tuple[str, str]] = set()
+        for row in positions:
+            market = row["market"]
+            symbol = str(row["symbol"]).upper()
+            side = row["side"]
+            quantity = float(row["quantity"])
+            if is_flat_quantity(quantity):
+                self._delete_sim_position(market, symbol)
+                self.close_position_record("simulated", market, symbol, mark_prices.get((market, symbol), 0.0))
+                closed_keys.add((market, symbol))
+                cleared += 1
+                continue
+            mark_price = mark_prices.get((market, symbol)) or float(row["entry_price"])
+            if mark_price <= 0:
+                mark_price = float(row["entry_price"])
+            exit_side = "SELL" if side == "long" else "BUY"
+            self.apply_fill(market, symbol, exit_side, quantity, mark_price, float(row["leverage"]))
+            self.close_position_record("simulated", market, symbol, mark_price)
+            closed_keys.add((market, symbol))
+            cleared += 1
+
+        for record in records:
+            key = (record["market"], str(record["symbol"]).upper())
+            if key in closed_keys:
+                continue
+            self.close_position_record(
+                "simulated",
+                record["market"],
+                record["symbol"],
+                float(record["mark_price"] or record["entry_price"] or 0),
+            )
+            cleared += 1
+        return cleared
+
+    def _delete_sim_position(self, market: str, symbol: str) -> None:
+        self.initialize()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sim_positions WHERE market = ? AND symbol = ?", (market, symbol.upper()))
 
     def apply_fill(
         self,
@@ -369,7 +572,7 @@ class SimulatedPortfolio:
             else:
                 raise ValueError("side must be BUY or SELL")
             conn.execute("UPDATE sim_account SET balance = ? WHERE asset = 'USDT'", (cash,))
-            if new_quantity == 0:
+            if is_flat_quantity(new_quantity):
                 conn.execute("DELETE FROM sim_positions WHERE market = ? AND symbol = ?", (market, symbol))
             else:
                 conn.execute(
@@ -415,6 +618,8 @@ class SimulatedPortfolio:
             )
         mark = mark_price or float(row["entry_price"])
         quantity = float(row["quantity"])
+        if is_flat_quantity(quantity):
+            return flat_position("simulated", market, symbol, mark)
         entry = float(row["entry_price"])
         side = row["side"]
         side_multiplier = -1 if side == "short" else 1
@@ -491,11 +696,11 @@ class SimulatedPortfolio:
             realized += (old_entry - price) * closing
 
         remaining = old_quantity - quantity
+        if is_flat_quantity(remaining):
+            return "flat", 0.0, 0.0, realized
         if remaining > 0:
             return old_side, remaining, old_entry, realized
-        if remaining < 0:
-            return target_side, abs(remaining), price, realized
-        return target_side, 0.0, price, realized
+        return target_side, abs(remaining), price, realized
 
     @staticmethod
     def _apply_futures_fill_to_state(
@@ -522,14 +727,14 @@ class SimulatedPortfolio:
         closing = min(old_quantity, quantity)
         realized = (price - old_entry) * closing if old_side == "long" else (old_entry - price) * closing
         remaining = old_quantity - quantity
-        if remaining > 0:
+        if is_flat_quantity(remaining):
+            state["side"] = "flat"
+            state["quantity"] = 0.0
+            state["entry"] = 0.0
+        elif remaining > 0:
             state["quantity"] = remaining
         elif remaining < 0:
             state["side"] = target_side
             state["quantity"] = abs(remaining)
             state["entry"] = price
-        else:
-            state["side"] = "flat"
-            state["quantity"] = 0.0
-            state["entry"] = 0.0
         return realized

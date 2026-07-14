@@ -70,3 +70,32 @@ def test_websocket_price_cache_rejects_stale_prices() -> None:
     cache._prices[("futures", "UNIUSDT")] = StreamPrice("futures", "UNIUSDT", 11.0, time.time())
 
     assert cache.latest_price("futures", "UNIUSDT") == 11.0
+
+
+def test_futures_websocket_uses_binancefuture_endpoint_first() -> None:
+    cache = BinanceWebSocketPriceCache()
+    cache.update_symbols([("futures", "UNIUSDT")])
+
+    urls = cache._stream_urls(cache._stream_names())
+
+    assert urls[0].startswith("wss://fstream.binancefuture.com/")
+    assert "uniusdt@markPrice@1s" in urls[0]
+    assert urls[1].startswith("wss://fstream.binance.com/")
+
+
+def test_websocket_freshness_reports_last_error_while_waiting() -> None:
+    cache = BinanceWebSocketPriceCache()
+    cache.update_symbols([("futures", "UNIUSDT")])
+    cache._running = True
+    cache.last_error = "timed out"
+
+    assert "最近错误：timed out" in cache.freshness_text()
+
+
+def test_websocket_price_cache_ignores_invalid_json_frame() -> None:
+    cache = BinanceWebSocketPriceCache()
+
+    cache._on_message(None, "")
+
+    assert cache.last_error is not None
+    assert "无效行情帧" in cache.last_error

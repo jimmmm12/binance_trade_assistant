@@ -128,8 +128,52 @@ def test_evaluate_plan_from_form_returns_risk_review_and_plan():
     )
 
     assert plan.symbol == "UNIUSDT"
+    assert plan.equity == 800
+    assert review.risk_bucket == "低风险"
+    assert review.allocation_pct == 80
+    assert review.total_equity == 1000
     assert review.liquidation_status == "安全"
-    assert review.management_rules[0] == "到 1R 后：止损移动到成本价"
+    assert review.management_rules[0] == "首次只建目标仓位 40%，确认后再分批加仓"
+
+
+def test_evaluate_plan_from_form_limits_high_risk_plan_to_twenty_percent_equity():
+    signal = Signal(
+        market="futures",
+        symbol="UNIUSDT",
+        side="long",
+        score=9,
+        last=10,
+        change_24h=2,
+        quote_volume_m=180,
+        rsi_1h=61,
+        rsi_4h=58,
+        volume_ratio=1.5,
+        momentum_24h=2,
+        momentum_3d=5,
+        funding_pct=0.01,
+        note="偏多观察",
+        atr_pct=7,
+    )
+
+    plan, review = evaluate_plan_from_form(
+        symbol="UNIUSDT",
+        market="futures",
+        side="long",
+        entry="10",
+        stop="9.2",
+        target="11.6",
+        equity="1000",
+        risk_pct="1",
+        leverage="1",
+        signal=signal,
+        position=None,
+        mode="intraday",
+    )
+
+    assert plan.equity == 200
+    assert review.risk_bucket == "高风险"
+    assert review.allocation_pct == 20
+    assert review.allocation_equity == 200
 
 
 def test_create_plan_from_form_rejects_empty_required_prices_with_chinese_message():
@@ -233,6 +277,47 @@ def test_order_from_form_live_path_accepts_injected_client(monkeypatch):
     assert calls[0][3] is True
 
 
+def test_order_from_form_formats_zero_precision_futures_quantity(monkeypatch):
+    monkeypatch.setenv("BINANCE_ENABLE_LIVE_TRADING", "true")
+    calls = []
+
+    class FakeClient:
+        def public_get(self, market, path, params=None):
+            return {
+                "symbols": [
+                    {
+                        "symbol": "LABUSDT",
+                        "filters": [
+                            {"filterType": "LOT_SIZE", "minQty": "1", "stepSize": "1"},
+                            {"filterType": "MARKET_LOT_SIZE", "minQty": "1", "stepSize": "1"},
+                        ],
+                    }
+                ]
+            }
+
+    def fake_place_order(client, market, payload, allow_live, confirm):
+        calls.append(payload)
+        return {"orderId": 123, "payload": payload}
+
+    result = order_from_form(
+        market="futures",
+        symbol="labusdt",
+        side="SELL",
+        quantity="10.00000000",
+        order_type="MARKET",
+        price="",
+        allow_live=True,
+        confirm=LIVE_CONFIRMATION,
+        reduce_only=True,
+        client=FakeClient(),
+        place_order_fn=fake_place_order,
+    )
+
+    assert result["payload"]["quantity"] == "10"
+    assert result["payload"]["reduceOnly"] is True
+    assert calls[0]["quantity"] == "10"
+
+
 def test_order_from_form_limit_requires_price():
     try:
         order_from_form(
@@ -260,6 +345,7 @@ def test_simulate_order_from_form_writes_local_position(tmp_path):
         order_type="MARKET",
         price="",
         fallback_price="3.5",
+        leverage="5",
         portfolio_path=tmp_path / "sim.db",
     )
 
@@ -267,6 +353,7 @@ def test_simulate_order_from_form_writes_local_position(tmp_path):
     assert position.side == "long"
     assert position.quantity == 2
     assert position.entry_price == 3.5
+    assert position.leverage == 5
 
 
 def test_run_scan_accepts_injected_dependencies(tmp_path):

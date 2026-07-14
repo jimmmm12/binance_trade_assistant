@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from .binance_client import BinanceClient
@@ -11,6 +12,7 @@ from .broker import build_order_payload, place_order
 from .report import trade_plan_to_markdown, write_scan_report
 from .risk import create_trade_plan
 from .strategy import scan_market
+from .strategy_scoring import score_signal
 
 
 DEFAULT_SETTINGS = {
@@ -25,8 +27,211 @@ DEFAULT_SETTINGS = {
     "daily_loss_warning_pct": 1.5,
     "intraday_atr_multiplier": 1.4,
     "swing_atr_multiplier": 1.8,
-    "min_live_score": 70,
+    "min_live_score": 75,
+    "risk_allocation": {
+        "high_risk_pct": 20.0,
+        "low_risk_pct": 80.0,
+    },
+    "auto_execution": {
+        "max_new_positions_per_cycle": 2,
+        "secondary_min_open_score": 65,
+        "secondary_risk_multiplier": 0.5,
+        "websocket_ready_wait_seconds": 30,
+        "websocket_max_age_seconds": 20,
+        "post_only_entries": True,
+        "post_only_fallback_offset_bps": 3.0,
+        "symbol_reentry_cooldown_minutes": 30,
+        "max_entries_per_symbol_per_day": 3,
+        "estimated_round_trip_cost_bps": 16.0,
+        "min_expected_net_gain_pct": 0.45,
+        "min_net_to_cost_multiple": 2.5,
+        "live_min_score": 72,
+        "live_min_volume_ratio": 1.2,
+        "live_allowed_strategies": ["trend_following", "breakout"],
+        "live_block_warning_markers": [
+            "多周期方向冲突",
+            "识别出的市场趋势相反",
+            "主动成交方向与信号背离",
+            "价格离保护结构较远",
+        ],
+        "portfolio_max_signed_correlation": 0.75,
+        "portfolio_max_correlated_positions": 1,
+        "portfolio_correlation_lookback": 48,
+    },
+    "opportunity_selection": {
+        "enabled": True,
+        "min_research_score_live": 62.0,
+        "min_research_score_aggressive": 55.0,
+        "structural_override_score": 82.0,
+        "min_quote_volume_m": 30.0,
+        "min_intraday_move_pct": 0.8,
+        "ideal_intraday_move_pct": 3.5,
+        "max_usable_intraday_move_pct": 5.5,
+        "high_volatility_percentile": 92.0,
+        "high_volatility_penalty": 12.0,
+        "soft_warning_penalty": 5.0,
+        "structural_warning_penalty": 18.0,
+        "non_preferred_strategy_penalty": 16.0,
+        "max_protection_distance_atr": 2.8,
+        "allow_benchmark_divergence_aggressive": True,
+        "preferred_live_strategies": ["trend_following", "breakout"],
+        "weights": {
+            "base_signal": 0.35,
+            "liquidity": 0.18,
+            "relative_strength": 0.18,
+            "trend_confirmation": 0.19,
+            "cost_edge": 0.10,
+        },
+    },
+    "aggressive_line": {
+        "first_entry_pct": 0.75,
+        "max_single_risk_pct": 5.0,
+        "max_symbol_exposure_pct": 300.0,
+        "max_total_exposure_pct": 600.0,
+        "min_leverage": 5.0,
+        "max_leverage": 8.0,
+        "risk_allocation_pct": 100.0,
+        "min_notional_usdt": 8.0,
+        "min_open_score": 66,
+        "live_min_score": 66,
+        "live_min_volume_ratio": 0.7,
+        "min_expected_net_gain_pct": 0.22,
+        "min_net_to_cost_multiple": 1.4,
+        "min_net_reward_r": 0.75,
+        "live_allowed_strategies": ["trend_following", "breakout", "mean_reversion"],
+        "live_block_warning_markers": [
+            "多周期方向冲突",
+            "识别出的市场趋势相反",
+            "主动成交方向与信号背离"
+        ],
+        "margin_tiers": [
+            {"min_score": 90, "margin_pct": 55.0},
+            {"min_score": 80, "margin_pct": 42.0},
+            {"min_score": 70, "margin_pct": 32.0},
+            {"min_score": 66, "margin_pct": 22.0}
+        ],
+        "leverage_cut_atr_pct": 4.5,
+        "leverage_floor_atr_pct": 6.0,
+        "recovery_after_consecutive_losses": 5,
+        "recovery_min_score": 78,
+        "recovery_min_volume_ratio": 0.9,
+        "recovery_risk_multiplier": 0.45,
+        "add_stage_pcts": [0.25, 0.15],
+        "max_add_count": 2,
+        "min_profit_r_for_add": 1.1,
+        "min_add_score": 78,
+        "risk_reduce_pct": 0.35,
+        "profit_take_rules": [
+            {"r": 1.75, "reduce_pct": 0.2, "marker": "1.75R减仓"},
+            {"r": 3.0, "reduce_pct": 0.25, "marker": "3R减仓"},
+        ],
+        "trailing_atr_multiplier": 2.5,
+        "time_stop_hours": 18.0,
+        "time_stop_min_r": 0.25,
+        "time_stop_min_score": 72,
+        "max_margin_drawdown_reduce_pct": 15.0,
+        "max_margin_drawdown_close_pct": 28.0,
+        "max_position_leverage": 8.0,
+        "loss_streak_reduce_after": 3,
+        "loss_streak_stop_after": 8,
+        "loss_streak_reduction_multiplier": 0.35,
+        "score_tiers": [
+            {"min_score": 90, "multiplier": 1.0},
+            {"min_score": 80, "multiplier": 0.9},
+            {"min_score": 70, "multiplier": 0.8},
+            {"min_score": 66, "multiplier": 0.55},
+        ],
+    },
+    "automation_positioning": {
+        "max_single_risk_pct": 1.0,
+        "score_tiers": [
+            {"min_score": 90, "multiplier": 1.0},
+            {"min_score": 80, "multiplier": 0.7},
+            {"min_score": 70, "multiplier": 0.4},
+        ],
+        "min_open_score": 70,
+        "first_entry_pct": 0.4,
+        "max_initial_margin_pct": 20.0,
+        "add_stage_pcts": [0.3, 0.3],
+        "max_add_count": 2,
+        "min_profit_r_for_add": 1.0,
+        "min_add_score": 85,
+        "add_order_pct_of_initial": 0.3,
+        "allow_loss_add": False,
+        "loss_add_min_score": 92,
+        "max_loss_add_r": -0.35,
+        "profit_take_rules": [
+            {"r": 1.0, "reduce_pct": 0.3, "marker": "1R减仓"},
+            {"r": 2.0, "reduce_pct": 0.3, "marker": "2R减仓"}
+        ],
+        "risk_reduce_pct": 0.5,
+        "liquidity_sweep_protection": True,
+        "stop_confirmation_min_score": 70,
+        "atr_stop_multiplier": 2.0,
+        "trailing_atr_multiplier": 2.0,
+        "time_stop_hours": 48.0,
+        "time_stop_min_r": 0.5,
+        "time_stop_min_score": 78,
+        "reduce_score_threshold": 60,
+        "max_margin_drawdown_reduce_pct": 15.0,
+        "max_margin_drawdown_close_pct": 28.0,
+        "max_position_leverage": 5.0,
+        "max_symbol_exposure_pct": 40.0,
+        "max_total_exposure_pct": 180.0,
+        "loss_streak_reduce_after": 3,
+        "loss_streak_stop_after": 5,
+        "loss_streak_reduction_multiplier": 0.5
+    },
+    "signal_score": {
+        "weights": {
+            "trend": 30,
+            "momentum": 20,
+            "volume": 15,
+            "position": 15,
+            "timeframe": 10,
+            "regime": 10,
+        },
+        "thresholds": {
+            "grade_a": 90,
+            "grade_b": 70,
+            "observe": 50,
+            "add": 85,
+            "reduce": 60,
+        },
+        "position_multipliers": {
+            "grade_a": 1.0,
+            "grade_b": 0.6,
+            "observe": 0.3,
+            "blocked": 0.0,
+        },
+        "hard_limits": {
+            "intraday_atr_pct": 6.0,
+            "swing_atr_pct": 14.0,
+            "directional_funding_pct": 0.12,
+            "min_quote_volume_m": 20.0,
+        },
+    },
+    "system_risk": {
+        "max_single_risk_pct": 1.0,
+        "max_daily_loss_pct": 2.0,
+        "max_total_exposure_multiple": 3.0,
+        "max_symbol_exposure_pct": 40.0,
+        "max_leverage": 5.0,
+        "reduce_after_consecutive_losses": 3,
+        "stop_after_consecutive_losses": 5,
+    },
+    "order_manager": {
+        "partial_fill_policy": "wait",
+        "partial_fill_timeout_seconds": 30,
+        "auto_place_protective_orders": True,
+    },
 }
+
+
+class SettingsUnavailable(RuntimeError):
+    """Raised when the external settings file is temporarily unreadable."""
+
+    user_facing = True
 
 
 def resolve_root(
@@ -64,7 +269,35 @@ def ensure_config_exists(default_config_path: Path | None = None) -> None:
 
 def load_settings() -> dict:
     ensure_config_exists()
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    last_error: json.JSONDecodeError | None = None
+    for attempt in range(3):
+        try:
+            raw = CONFIG_PATH.read_text(encoding="utf-8")
+            if not raw.strip():
+                raise json.JSONDecodeError("settings file is empty", raw, 0)
+            stored = json.loads(raw)
+            if not isinstance(stored, dict):
+                raise json.JSONDecodeError("settings root must be an object", raw, 0)
+            return _merge_settings(DEFAULT_SETTINGS, stored)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.05)
+    raise SettingsUnavailable("配置文件正在写入或格式无效；本轮已安全跳过，下一轮会自动重试") from last_error
+
+
+def _merge_settings(defaults: dict, stored: dict) -> dict:
+    merged: dict = {}
+    for key, default_value in defaults.items():
+        stored_value = stored.get(key, default_value)
+        if isinstance(default_value, dict) and isinstance(stored_value, dict):
+            merged[key] = _merge_settings(default_value, stored_value)
+        else:
+            merged[key] = stored_value
+    for key, value in stored.items():
+        if key not in merged:
+            merged[key] = value
+    return merged
 
 
 def cmd_scan(args: argparse.Namespace) -> None:
@@ -75,8 +308,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
     all_shorts = []
     for market in markets:
         longs, shorts = scan_market(client, market, settings, args.top)
-        all_longs.extend(longs)
-        all_shorts.extend(shorts)
+        score_config = settings.get("signal_score")
+        all_longs.extend(score_signal(item, "intraday", config=score_config) for item in longs)
+        all_shorts.extend(score_signal(item, "intraday", config=score_config) for item in shorts)
     all_longs.sort(key=lambda x: (x.score, x.quote_volume_m), reverse=True)
     all_shorts.sort(key=lambda x: (x.score, x.quote_volume_m), reverse=True)
     md_path, csv_path = write_scan_report(all_longs, all_shorts, REPORT_DIR)

@@ -39,13 +39,16 @@ echo Building BinanceTradeAssistant.exe...
     --windowed ^
     --name BinanceTradeAssistant ^
     --distpath "%DIST_PARENT%" ^
+    --icon "assets\app_icon.ico" ^
     --add-data "config;config" ^
+    --add-data "assets;assets" ^
     --add-binary "D:\veighna_studio\DLLs\_sqlite3.pyd;." ^
     --add-binary "D:\veighna_studio\DLLs\sqlite3.dll;." ^
     --hidden-import PySide6.QtCore ^
     --hidden-import PySide6.QtGui ^
     --hidden-import PySide6.QtWidgets ^
     --hidden-import _sqlite3 ^
+    --hidden-import websocket ^
     trade_assistant\gui\app.py
 
 if errorlevel 1 (

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "binance_trade_assistant_research_dataset",
+  "retention": "append_only",
+  "protected": true,
+  "cleanup_policy": "Never delete this directory when cleaning builds, releases, reports, or old executables.",
+  "contains": [
+    "automation decisions",
+    "market features",
+    "risk reasons",
+    "future outcome labels"
+  ]
+}

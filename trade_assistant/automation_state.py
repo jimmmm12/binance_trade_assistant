@@ -49,5 +49,28 @@ class AutoTradeStateMachine:
     def summary(self) -> str:
         if not self.transitions:
             return self.state.value
-        return " -> ".join([self.transitions[0].from_state.value, *[item.to_state.value for item in self.transitions]])
+        path = " -> ".join([self.transitions[0].from_state.value, *[item.to_state.value for item in self.transitions]])
+        return compact_state_path(path)
 
+
+def compact_state_path(path: str, max_steps: int = 6) -> str:
+    parts = [part.strip() for part in str(path).split("->") if part.strip()]
+    if not parts:
+        return AutoTradeState.EMPTY_OBSERVING.value
+
+    collapsed: list[str] = []
+    for part in parts:
+        if not collapsed or collapsed[-1] != part:
+            collapsed.append(part)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in collapsed:
+        if part in seen:
+            continue
+        deduped.append(part)
+        seen.add(part)
+    collapsed = deduped
+
+    if len(collapsed) <= max_steps:
+        return " -> ".join(collapsed)
+    return " -> ".join([collapsed[0], "...", *collapsed[-(max_steps - 2) :]])

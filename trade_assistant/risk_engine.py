@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .automation_policy import automation_sizing_config
 from .models import PositionSnapshot, Signal, TradePlan
 
 
@@ -21,6 +22,10 @@ class PlanRiskReview:
     warnings: list[str]
     reasons: list[str]
     management_rules: list[str]
+    risk_bucket: str = "低风险"
+    allocation_pct: float = 80.0
+    allocation_equity: float = 0.0
+    total_equity: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -55,7 +60,7 @@ def evaluate_plan_risk(
     signal: Signal | None,
     position: PositionSnapshot | None,
     mode: str,
-    min_live_score: int = 70,
+    min_live_score: int = 75,
 ) -> PlanRiskReview:
     warnings: list[str] = []
     reasons: list[str] = []
@@ -131,6 +136,34 @@ def evaluate_plan_risk(
     )
 
 
+def classify_risk_bucket(
+    review: PlanRiskReview,
+    signal: Signal | None,
+    mode: str,
+    high_risk_min_score: int = 82,
+) -> str:
+    if review.recommended_action in {"禁止真仓", "只观察", "只建议模拟", "谨慎小仓"}:
+        return "高风险"
+    if review.quality_score < high_risk_min_score:
+        return "高风险"
+    if signal is None:
+        return "低风险"
+    atr = signal.atr_4h_pct if mode == "swing" and signal.atr_4h_pct is not None else signal.atr_pct
+    atr = atr if atr is not None else 0.0
+    if atr >= (4.0 if mode == "intraday" else 8.0):
+        return "高风险"
+    if signal.funding_pct is not None and abs(signal.funding_pct) >= 0.08:
+        return "高风险"
+    return "低风险"
+
+
+def allocation_pct_for_bucket(settings: dict, risk_bucket: str) -> float:
+    allocation = settings.get("risk_allocation", {})
+    high_pct = float(allocation.get("high_risk_pct", 20.0))
+    low_pct = float(allocation.get("low_risk_pct", 80.0))
+    return high_pct if risk_bucket == "高风险" else low_pct
+
+
 def daily_loss_guard(
     equity: float,
     realized_pnl: float,
@@ -154,10 +187,17 @@ def account_read_failed_guard() -> DailyLossGuard:
 
 
 def management_rules(plan: TradePlan) -> list[str]:
+    config = automation_sizing_config(None)
+    profit_rules = [
+        f"到 {target_r:g}R 后：减仓 {reduce_pct:.0%}，剩余仓位进入移动止损"
+        for target_r, reduce_pct, _ in sorted(config.profit_take_rules, key=lambda item: item[0])
+    ]
     return [
-        "到 1R 后：止损移动到成本价",
-        "到 1.5R 后：减仓 30%",
-        "到 2R 后：保留尾仓，剩余仓位用移动止损",
+        f"首次只建目标仓位 {config.first_entry_pct:.0%}，确认后再分批加仓",
+        "只允许顺势盈利加仓，默认禁止亏损补仓和马丁格尔",
+        *profit_rules,
+        f"移动止损：按最高/最低有利价格回撤约 {config.trailing_atr_multiplier:.1f} 倍ATR",
+        f"时间止损：超过 {config.time_stop_hours:.0f} 小时未达到 {config.time_stop_min_r:.1f}R 且评分不足则退出",
         f"若价格触及止损 {plan.stop:.8f}：退出，不补仓摊平",
     ]
 

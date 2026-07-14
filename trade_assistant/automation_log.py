@@ -8,6 +8,7 @@ from pathlib import Path
 from .main import ROOT
 from .models import ScoredSignal, Signal, TradePlan
 from .risk_engine import PlanRiskReview
+from .dataset import append_automation_record
 
 
 DEFAULT_AUTOMATION_LOG_PATH = ROOT / "data" / "automation_events.jsonl"
@@ -29,6 +30,15 @@ class AutomationEvent:
     funding_pct: float | None = None
     realized_pnl: float | None = None
     plan_followed: bool | None = None
+    grade: str | None = None
+    position_multiplier: float | None = None
+    score_breakdown: dict[str, int] | None = None
+    reasons: list[str] | None = None
+    warnings: list[str] | None = None
+    selected_strategy: str | None = None
+    market_regime: str | None = None
+    return_series_1h: list[float] | None = None
+    plan: dict[str, float | str] | None = None
 
 
 def append_automation_event(path: Path | None, event: AutomationEvent) -> None:
@@ -36,6 +46,12 @@ def append_automation_event(path: Path | None, event: AutomationEvent) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as file:
         file.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
+    if path is None:
+        try:
+            append_automation_record(event)
+        except OSError:
+            # Dataset capture must never interrupt a trading decision.
+            pass
 
 
 def build_automation_event(
@@ -51,6 +67,7 @@ def build_automation_event(
 ) -> AutomationEvent:
     base = signal.signal if isinstance(signal, ScoredSignal) else signal
     score = signal.score if isinstance(signal, ScoredSignal) else (base.score if base else None)
+    breakdown = signal.breakdown if isinstance(signal, ScoredSignal) else None
     return AutomationEvent(
         created_at=datetime.now().isoformat(timespec="seconds"),
         state=state,
@@ -66,6 +83,37 @@ def build_automation_event(
         funding_pct=base.funding_pct if base else None,
         realized_pnl=realized_pnl,
         plan_followed=plan_followed,
+        grade=breakdown.grade if breakdown else None,
+        position_multiplier=breakdown.position_multiplier if breakdown else None,
+        score_breakdown=(
+            {
+                "trend": breakdown.trend,
+                "momentum": breakdown.momentum,
+                "volume": breakdown.volume,
+                "position": breakdown.positioning,
+                "timeframe": breakdown.timeframe,
+                "regime": breakdown.regime,
+            }
+            if breakdown
+            else None
+        ),
+        reasons=breakdown.reasons if breakdown else None,
+        warnings=breakdown.warnings if breakdown else None,
+        selected_strategy=breakdown.selected_strategy if breakdown else None,
+        market_regime=breakdown.market_regime if breakdown else None,
+        return_series_1h=list(base.returns_1h) if base else None,
+        plan=(
+            {
+                "entry": plan.entry,
+                "stop": plan.stop,
+                "target": plan.target,
+                "risk_pct": plan.risk_pct,
+                "leverage": plan.leverage,
+                "notional": plan.notional,
+            }
+            if plan
+            else None
+        ),
     )
 
 
@@ -76,4 +124,3 @@ def _best_atr(signal: Signal | None) -> float | None:
         if value is not None:
             return value
     return None
-

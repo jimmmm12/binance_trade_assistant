@@ -88,6 +88,20 @@ QPushButton#PrimaryButton {
     border-color: #0f9f8f;
     font-weight: 700;
 }
+QPushButton#PositionModeButton {
+    background: #f7fafb;
+    color: #42515a;
+    border: 1px solid #b8c8cf;
+    font-weight: 700;
+}
+QPushButton#PositionModeButton:hover {
+    background: #edf5f6;
+}
+QPushButton#PositionModeButton:checked {
+    background: #1e2930;
+    color: #ffffff;
+    border-color: #1e2930;
+}
 QPushButton#DangerButton {
     background: #fff4f1;
     color: #b83222;

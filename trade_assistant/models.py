@@ -32,6 +32,23 @@ class Signal:
     atr_pct: float | None = None
     atr_1h_pct: float | None = None
     atr_4h_pct: float | None = None
+    ema20_1h: float | None = None
+    ema50_1h: float | None = None
+    ema50_4h: float | None = None
+    ema200_4h: float | None = None
+    ema20_1d: float | None = None
+    ema50_1d: float | None = None
+    adx_1h: float | None = None
+    adx_4h: float | None = None
+    macd_hist_1h: float | None = None
+    macd_hist_delta_1h: float | None = None
+    taker_buy_ratio: float | None = None
+    obv_slope_pct: float | None = None
+    support_distance_atr: float | None = None
+    resistance_distance_atr: float | None = None
+    breakout_atr: float | None = None
+    atr_percentile: float | None = None
+    returns_1h: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +87,18 @@ class ScoreBreakdown:
     position: int = 0
     recommendation: str = "等待确认"
     action_level: str = "observe"
+    momentum: int = 0
+    positioning: int = 0
+    timeframe: int = 0
+    regime: int = 0
+    grade: str = "未分级"
+    confidence: float = 0.0
+    position_multiplier: float = 1.0
+    add_allowed: bool = False
+    reduce_recommended: bool = False
+    market_regime: str = "UNKNOWN"
+    regime_confidence: float = 0.0
+    selected_strategy: str = "none"
 
 
 @dataclass(frozen=True)

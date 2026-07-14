@@ -60,7 +60,7 @@ def test_evaluate_plan_risk_scores_liquid_safe_plan_and_adds_management_rules() 
     assert risk.liquidation_status == "安全"
     assert risk.quality_score >= 75
     assert risk.live_allowed is True
-    assert risk.management_rules[0] == "到 1R 后：止损移动到成本价"
+    assert risk.management_rules[0] == "首次只建目标仓位 40%，确认后再分批加仓"
 
 
 def test_evaluate_plan_risk_penalizes_existing_heavy_position() -> None:

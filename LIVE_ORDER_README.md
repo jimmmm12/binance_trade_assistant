@@ -31,7 +31,7 @@ set BINANCE_API_SECRET=PUT_YOUR_API_SECRET_HERE
 再改订单：
 
 ```bat
-python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type MARKET --allow-live --confirm LIVE_TRADING_CONFIRMED
+python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type MARKET --allow-live --confirm 确认下单
 ```
 
 参数含义：
@@ -50,7 +50,7 @@ python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY -
 限价单示例：
 
 ```bat
-python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type LIMIT --price 3.20 --allow-live --confirm LIVE_TRADING_CONFIRMED
+python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY --quantity 1 --type LIMIT --price 3.20 --allow-live --confirm 确认下单
 ```
 
 ## 三重开关
@@ -60,7 +60,7 @@ python -m trade_assistant.main order --market spot --symbol UNIUSDT --side BUY -
 ```text
 1. 设置 BINANCE_API_KEY 和 BINANCE_API_SECRET
 2. 设置 BINANCE_ENABLE_LIVE_TRADING=true
-3. 命令里带 --allow-live --confirm LIVE_TRADING_CONFIRMED
+3. 命令里带 --allow-live --confirm 确认下单
 ```
 
 少一个条件，程序就只会 dry-run，不会真下单。
